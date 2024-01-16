@@ -1,0 +1,25 @@
+# To download high coverage 1KGP EUR VCF
+
+wget ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/working/20220422_3202_phased_SNV_INDEL_SV/1kGP_high_coverage_Illumina.chr5.filtered.SNV_INDEL_SV_phased_panel.vcf.gz
+
+# Filter to first 6 Mb and keep only SNPs
+
+plink --vcf [input_dataset] --chr 5 --from-mb 0 --to-mb 6 --snps-only --keep [sample_list.txt] --recode vcf --out [output_dataset]
+
+# Integrate VNTR genotypes into VCF using BBEdit
+# Make sure to add the following phase set indicator to VCF header to maintain within sample phase
+
+##FORMAT=<ID=PS,Number=1,Type=Integer,Description="Phase set identifier">
+
+## Phasing of VNTR genotypes to SNPs was performed with Shapeit4.2
+## Phase sets were assigned to each individual to maintain physical PacBio genotype phasing
+
+shapeit4.2 --input chr5_6Mb_SNPs_only_with_VNTRs_sorted.vcf.gz --map shapeit_maps/chr5.b38.gmap.gz --region 5 --output chr5_6Mb_SNPs_only_with_VNTRs_sorted_phased.vcf --use-PS 0.0001
+
+VNTR genotypes were assigned arbitrary coordinates within the hg38 reference sequece that did not overlap with any variants included in 1KGP
+
+Imputation is then performed with Beagle5.4 using the a command similar to below
+
+java -jar $BEAGLE_JAR nthreads=$SLURM_CPUS_PER_TASK gt=P12/5.vcf.gz ref=EUR_ref/chr5_6Mb_SNPs_only_with_VNTRs_sorted_phased.vcf impute=true map=beagle_maps/plink.chr5.GRCh38.map out=chr5_P12_imputed
+
+
