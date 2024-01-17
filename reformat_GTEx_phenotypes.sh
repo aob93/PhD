@@ -9,10 +9,10 @@ DIRECTORY="/path/to/your/directory"
 for file in $DIRECTORY/*.bed.gz
 do
     # Remove 'chr' prefix and create a new intermediate file
-    zcat "$file" | awk '{ sub(/^chr/, "", $1); print }' | gzip > "${file%.bed.gz}.mod.bed.gz"
+    zcat "$file" | awk '{ sub(/^chr/, "", $1); print }' | bgzip > "${file%.bed.gz}.mod.bed.gz"
 
     # Sort the modified file according to BED format
-    zcat "${file%.bed.gz}.mod.bed.gz" | sort -k1,1 -k2,2n | gzip > "${file%.bed.gz}.sorted.mod.bed.gz"
+    zcat "${file%.bed.gz}.mod.bed.gz" | sort -k1,1 -k2,2n | bgzip > "${file%.bed.gz}.sorted.mod.bed.gz"
 
     # Remove intermediate unsorted file
     rm "${file%.bed.gz}.mod.bed.gz"
