@@ -18,8 +18,23 @@ shapeit4.2 --input chr5_6Mb_SNPs_only_with_VNTRs_sorted.vcf.gz --map shapeit_map
 
 VNTR genotypes were assigned arbitrary coordinates within the hg38 reference sequece that did not overlap with any variants included in 1KGP
 
+VCF files should be made consistent with the chr formatting of the reference VCF
+Make sure to also liftover any coordinates to hg38 (or whatever ref build the panel is on)
+
+For the VCF files I have from PS12, 3 and PC4;
+
+recode as a plink format VCF;
+
+plink --vcf <VCF> --recode vcf --double-id --out <out_vcf>
+
+Liftover using crossmap;
+
+crossmap vcf ../hg19ToHg38.over.chain.gz 5.plink.vcf ../hg38.fa.gz  5.hg38.vcf
+
+GTEx v8 is already in hg38 so liftover not needed 
+
 Imputation is then performed with Beagle5.4 using the a command similar to below
 
 java -jar $BEAGLE_JAR nthreads=$SLURM_CPUS_PER_TASK gt=P12/5.vcf.gz ref=EUR_ref/chr5_6Mb_SNPs_only_with_VNTRs_sorted_phased.vcf impute=true map=beagle_maps/plink.chr5.GRCh38.map out=chr5_P12_imputed
 
-
+For running GTEx eQTL and sQTL analysis, the resultant imputed VCF file is mismatched with chr formatting with the phenotypes  
