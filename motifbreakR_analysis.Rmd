@@ -1,0 +1,117 @@
+---
+title: "MotifbreakR"
+output: html_notebook
+---
+motifbreakR analsis for rs11133729, rs421629 and rs31487
+
+Install and load necessary packages
+
+```{r}
+# Ensure BiocManager is installed for Bioconductor packages
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+# Define CRAN and Bioconductor packages required
+cran_packages <- c("tidyverse", "TFMPvalue", "knitr", "rmarkdown")
+bioconductor_packages <- c("BiocParallel", "motifStack", "BSgenome", "BiocGenerics",
+                           "Biostrings", "GenomeInfoDb", "GenomicRanges", "Gviz", 
+                           "S4Vectors", "rtracklayer", "IRanges", "MotifDb", 
+                           "BSgenome.Hsapiens.UCSC.hg19", "SNPlocs.Hsapiens.dbSNP.20120608",
+                           "SNPlocs.Hsapiens.dbSNP155.GRCh37", "VariantAnnotation", 
+                           "matrixStats", "BiocStyle", "motifbreakR", 
+                           "BSgenome.Hsapiens.UCSC.hg19", "SNPlocs.Hsapiens.dbSNP155.GRCh37", 
+                           "GenomicRanges", "plyranges")
+
+# Install CRAN packages not already installed
+for (pkg in cran_packages) {
+    if (!require(pkg, character.only = TRUE, quietly = TRUE))
+        install.packages(pkg)
+}
+
+# Install Bioconductor packages not already installed
+for (pkg in bioconductor_packages) {
+    if (!require(pkg, character.only = TRUE, quietly = TRUE))
+        BiocManager::install(pkg)
+}
+
+# Load libraries
+library(motifbreakR)
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(SNPlocs.Hsapiens.dbSNP155.GRCh37)
+library(tidyverse)
+library(GenomicRanges)
+
+
+```
+
+Create a SNP granges object
+
+```{r}
+# Create a data frame of SNPs
+snps <- c("rs11133729", "rs421629", "rs31487")
+
+snps.mb <- snps.from.rsid(snps,
+                               dbSNP = SNPlocs.Hsapiens.dbSNP155.GRCh37,
+                               search.genome = BSgenome.Hsapiens.UCSC.hg19)
+head(snps.mb)
+```
+
+```{r}
+# Perform motifbreakR analysis for selected SNPs
+data(MotifDb)
+data(hocomoco)
+MotifDb_HS <-  subset(MotifDb, organism =='Hsapiens') # Subset to only HSapiens matrices
+all_hocomoco <- subset(MotifDb_HS, grepl("HOCOMOCO", dataSource, ignore.case =TRUE))
+
+
+result_MotifDb_hocomoco<- motifbreakR(snps.mb, filterp = TRUE,
+                       threshold = 1e-3, #we perform a rough filter on the results by rounding all values in the PWM to two decimal place, and calculating a scoring threshold based upon that.
+                       pwmList = hocomoco,
+                       method = "ic",
+                       bkg = c(A=0.25, C=0.25, G=0.25, T=0.25),
+                       BPPARAM = BiocParallel::bpparam())
+
+
+result_MotifDb_hocomoco <- calculatePvalue(result_MotifDb_hocomoco, background = c(A=0.25, C=0.25, G=0.25, T=0.25), BPPARAM=BiocParallel::SerialParam(), granularity = 1e-5) # For most purposes a range of 1e-4 to 1e-6 is an acceptable trade off between accuracy and speed.
+
+# Convert GRAnges to df to get closer look
+result_MotifDb_df <- as.data.frame(result_MotifDb_hocomoco, row.names = NULL)
+
+# View the first few rows of the dataframe
+result_MotifDb_df
+```
+
+Generate motifbreakR, based on the top 20 most disrupted TFs based on absolute alleleEffectSize
+
+```{r}
+library(GenomicRanges)
+library(dplyr)
+library(plyranges)
+
+rs11133729_plot <- plotMB(results = result_MotifDb_hocomoco, rsid = "rs11133729", effect = "strong")
+
+
+pdf("/Users/obriena2/Documents/Thesis/Figures/rs11133729.motifbreakr.test.pdf", height = 15)
+plotMB(results = result_MotifDb_hocomoco, rsid = "rs11133729", effect = "strong")
+dev.off()
+
+
+pdf("/Users/obriena2/Documents/Thesis/Figures/rs31487.motifbreakr.test.pdf", height = 15)
+plotMB(results = result_MotifDb_hocomoco, rsid = "rs31487")
+dev.off()
+
+svg("/Users/obriena2/Documents/Thesis/Figures/rs421629.motifbreakr.test.pdf", height = 15)
+plotMB(results = result_MotifDb_hocomoco, rsid = "rs421629", effect = "strong")
+dev.off()
+
+pdf("/Users/obriena2/Documents/Thesis/Figures/motifbreakr_tests.pdf", height = 15)
+
+plotMB(results = result_MotifDb_hocomoco, rsid = "rs11133729", effect = "strong")
+plotMB(results = result_MotifDb_hocomoco, rsid = "rs31487")
+plotMB(results = result_MotifDb_hocomoco, rsid = "rs421629", effect = "strong")
+
+dev.off()
+
+
+```
+
