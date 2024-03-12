@@ -1,0 +1,546 @@
+---
+title: "March 2023 MPRA Analysis"
+output: html_notebook
+---
+
+A typo in previous code led to some SNPs being excluded during the barcode deduplication step, this script aims to process all cell lines in a singular script so that results are easily amenable to a Shiny app 
+
+```{r}
+setwd("/Volumes/Group06/LTG/Amundadottir Lab/Aidan/MPRA/MPRA_regression_master/5p15/")     
+rm(list = ls())
+suppressMessages(library(tidyverse))
+suppressMessages(library(ggrepel))
+suppressMessages(library(viridis))
+suppressMessages(library(gplots))
+#library(hrbrthemes)
+library(stringr)
+library(splitstackshape)
+args <- commandArgs(trailingOnly=TRUE)
+
+
+chr5_tags <- read.table(file = '/Users/obriena2/Documents/MPRA/FINAL.OLIGO.LISTS/AOB.5p15.33.POOL.60K.txt', header = T, sep = '\t', stringsAsFactors = T) 
+chr5_tags <- chr5_tags[,c(1,5)]
+chr5_tags <- chr5_tags[-which(duplicated(chr5_tags$Barcode)),]
+chr5_tags$Variant <- str_extract(string = chr5_tags$OligoID, pattern = "rs\\d*")
+colnames(chr5_tags) <- c("ID","Tag","Variant")
+chr5_tags <- chr5_tags[unique(chr5_tags$Tag),]
+vcf <- read.table(file = '5p15_variants.txt', header = T, sep = '\t', stringsAsFactors = T)
+
+# merge 
+chr5_tags <- merge(chr5_tags, vcf, by.x = 'Variant', by.y = "ID", all.x = TRUE)
+
+# Create empty vector for type and strand
+chr5_tags$Type <- "X"
+chr5_tags$Strand <- "fwd"
+
+# Assign Type based on ID
+
+chr5_tags$Type[which(grepl('_ref_', chr5_tags$ID))] <- "ref"
+chr5_tags$Type[which(grepl('_alt_', chr5_tags$ID))] <- "alt"
+chr5_tags$Type[which(grepl('SCRAMBLE',chr5_tags$ID))] <- 'scramble'
+chr5_tags$Strand[which(grepl('REV',chr5_tags$ID))] <- 'rev'
+chr5_tags$Type_Strand = str_c(chr5_tags$Type, chr5_tags$Strand, sep = "_")
+
+#reading in table of RNA and DNA input files
+
+count_paths_files <- list(
+  "/Volumes/Group06/LTG/Amundadottir Lab/Aidan/MPRA/MPRA_regression_master/5p15/293T/293T_count_paths.txt",
+  "/Volumes/Group06/LTG/Amundadottir Lab/Aidan/MPRA/MPRA_regression_master/5p15/Bladder/HTB9/HTB9_count_paths.txt",
+  "/Volumes/Group06/LTG/Amundadottir Lab/Aidan/MPRA/MPRA_regression_master/5p15/Bladder/UMUC3/UMUC3_count_paths.txt",
+  "/Volumes/Group06/LTG/Amundadottir Lab/Aidan/MPRA/MPRA_regression_master/5p15/Lung/A549/A549_count_paths.txt",
+  "/Volumes/Group06/LTG/Amundadottir Lab/Aidan/MPRA/MPRA_regression_master/5p15/Lung/H520/H520_count_paths.txt",
+  "/Volumes/Group06/LTG/Amundadottir Lab/Aidan/MPRA/MPRA_regression_master/5p15/Melanoma/903/903_count_paths.txt",
+  "/Volumes/Group06/LTG/Amundadottir Lab/Aidan/MPRA/MPRA_regression_master/5p15/Melanoma/1113/113_count_paths.txt",
+  "/Volumes/Group06/LTG/Amundadottir Lab/Aidan/MPRA/MPRA_regression_master/5p15/Pancreas/PANC1/PANC1_count_paths.txt",
+  "/Volumes/Group06/LTG/Amundadottir Lab/Aidan/MPRA/MPRA_regression_master/5p15/Pancreas/MP2/MP2_count_paths.txt"
+)
+
+MPRA_data = data_frame()
+
+chr5_tags$Tag <- tolower(chr5_tags$Tag)
+
+for (count_paths_file in count_paths_files) {
+  transfections = read_delim(file = count_paths_file, delim = '\t', col_names = T, col_types = cols())
+  count_paths_dir <- dirname(count_paths_file)
+  
+  # Extract cell line from count_paths_file
+  cell_line <- gsub(".*\\/(\\w+)_count_paths.txt", "\\1", count_paths_file)
+  
+  for (i in 1:nrow(transfections)){
+    rna_data <- read_delim(file.path(count_paths_dir, basename(as.character(transfections[i,'RNA']))), col_names = T, delim = '\t', col_types = cols())
+    rna_data <- chr5_tags %>% left_join(rna_data, by = 'Tag')
+    dna_data <- read_delim(file.path(count_paths_dir, basename(as.character(transfections[i,'DNA']))), col_names = T, delim = '\t', col_types = cols())
+    rna_data <- left_join(rna_data, dna_data, by = 'Tag', suffix = c("_RNA", "_DNA")) %>%
+                  mutate(TPM_RNA = TPM_RNA + 1) %>%
+                  mutate(TPM_DNA = TPM_DNA + 1) %>%
+                  #filter(TPM_DNA >=5) %>%
+                  mutate(Ratio = TPM_RNA/TPM_DNA) %>%
+                  mutate(Transfection = paste0('T', i)) %>%
+                  mutate(CellLine = cell_line)
+    MPRA_data <- bind_rows(MPRA_data, rna_data)
+  }
+}
+
+
+plot(density(log(MPRA_data$TPM_DNA,2), na.rm = T))
+abline(v = log(5,2), col="red")
+
+# Caluclate how many tags were removed after cutoff
+
+percent_tags_removed <- length(which(MPRA_data$TPM_DNA < 5)) / length(which(MPRA_data$TPM_DNA >5))
+100-percent_tags_removed*100
+
+# Remake the MPRA_data object now including the TPM filter
+
+for (i in 1:nrow(transfections)){
+	rna_data <- read_delim(as.character(transfections[i,'RNA']), col_names = T, delim = '\t', col_types = cols())
+	rna_data <- chr5_tags %>% left_join(rna_data, by = 'Tag')
+
+	dna_data <- read_delim(as.character(transfections[i,'DNA']), col_names = T, delim = '\t', col_types = cols())
+
+	rna_data <- left_join(rna_data, dna_data, by = 'Tag', suffix = c("_RNA", "_DNA")) %>%
+					mutate(TPM_RNA = TPM_RNA + 1) %>%
+					mutate(TPM_DNA = TPM_DNA + 1) %>%
+					filter(TPM_DNA >=5) %>%
+	        filter(TPM_RNA >=5) %>%
+					mutate(Ratio = TPM_RNA/TPM_DNA) %>%
+					mutate(Transfection = paste0('T', i))
+
+	MPRA_data <- bind_rows(MPRA_data, rna_data)
+}
+
+## Outlier Filter based on IQR
+
+filtered_data <- MPRA_data %>%
+  group_by(Variant, Type_Strand) %>%
+  mutate(
+    Q1 = quantile(Ratio, 0.25, na.rm = TRUE),
+    Q3 = quantile(Ratio, 0.75, na.rm = TRUE),
+    IQR = Q3 - Q1,
+    lower_bound = Q1 - 1.5 * IQR,
+    upper_bound = Q3 + 1.5 * IQR) %>%
+  dplyr::filter(Ratio >= lower_bound & Ratio <= upper_bound) %>%
+  dplyr::select(-Q1, -Q3, -IQR, -lower_bound, -upper_bound)  # Remove helper columns
+
+
+```
+Create a new DF describing the average ratio of the scramble sequences for each cell line
+
+```{r}
+# Create an empty data frame to store the averages
+averages_scramle_ratio <- data.frame(CellLine = character(),
+                       Average = numeric())
+
+# Get the unique cell lines
+cell_lines <- unique(filtered_data$CellLine)
+
+# Loop through each cell line
+for (cell_line in cell_lines) {
+  # Calculate the mean for the current cell line and 'scramble' type
+  avg <- mean(filtered_data$Ratio[which(filtered_data$CellLine == cell_line & filtered_data$Type == "scramble")], na.rm = T)
+  
+  # Store the average in the averages data frame
+  averages_scramle_ratio <- rbind(averages_scramle_ratio, data.frame(CellLine = cell_line, Average = avg))
+}
+
+# Print the averages data frame
+print(averages_scramle_ratio)
+
+```
+
+
+Updated regression script
+
+Create a single dataframe
+```{r}
+# Initialize empty data frames for storing results
+averages_scramble_ratio <- data.frame()
+results <- data.frame()
+
+# Loop through each unique cell line
+for (cell_line in unique(filtered_data$CellLine)) {
+  # Calculate and store average ratio for "scramble" type
+  avg <- mean(subset(filtered_data, CellLine == cell_line & Type == "scramble")$Ratio, na.rm = TRUE)
+  averages_scramble_ratio <- rbind(averages_scramble_ratio, data.frame(CellLine = cell_line, Average = avg))
+  
+  # Subset data for current cell line
+  data_subset <- subset(filtered_data, CellLine == cell_line)
+  
+  # Initialize a list to collect p-values for Bonferroni correction
+  p_values_list <- list()
+  
+  # Loop through each unique variant (SNP)
+  for (snp in unique(data_subset$Variant)) {
+    snp_data <- subset(data_subset, Variant == snp)
+    
+    # Initialize variables to hold results
+    log2fc_ref_vs_alt <- log2fc_ref_vs_scramble <- log2fc_alt_vs_scramble <- NA
+    pval_ref_vs_alt <- pval_ref_vs_scramble <- pval_alt_vs_scramble <- NA
+    
+      # Fit GLMs and collect results
+      for (pair in list(c("ref", "alt"), c("ref", "scramble"), c("alt", "scramble"))) {
+        fit <- tryCatch(glm(Ratio ~ Type + Strand + Transfection, data = subset(snp_data, Type %in% pair)),
+                       error = function(e) return(NULL))
+        
+        if (!is.null(fit)) {
+          coef <- summary(fit)$coefficients[2, ]
+          log2fc <- coef[1]
+          pval <- coef[4]
+        } else {
+          log2fc <- pval <- NA
+        }
+        
+        # Use 'all' to compare all elements of vectors
+        if (all(pair == c("ref", "alt"))) {
+          log2fc_ref_vs_alt <- log2fc
+          pval_ref_vs_alt <- pval
+        } else if (all(pair == c("ref", "scramble"))) {
+          log2fc_ref_vs_scramble <- log2fc
+          pval_ref_vs_scramble <- pval
+        } else if (all(pair == c("alt", "scramble"))) {
+          log2fc_alt_vs_scramble <- log2fc
+          pval_alt_vs_scramble <- pval
+        }
+      }    
+    
+    # Combine results into a single row and add to the results data frame
+    results <- rbind(results, data.frame(
+      CellLine = cell_line,
+      Variant = snp,
+      Log2FC_Ref_vs_Alt = log2fc_ref_vs_alt,
+      PVal_Ref_vs_Alt = pval_ref_vs_alt,
+      Log2FC_Ref_vs_Scramble = log2fc_ref_vs_scramble,
+      PVal_Ref_vs_Scramble = pval_ref_vs_scramble,
+      Log2FC_Alt_vs_Scramble = log2fc_alt_vs_scramble,
+      PVal_Alt_vs_Scramble = pval_alt_vs_scramble
+    ))
+  }
+}
+
+results$FDR_Ref_vs_Alt <- p.adjust(results$PVal_Ref_vs_Alt, method = "bonferroni")
+results$FDR_Ref_vs_Scramble <- p.adjust(results$PVal_Ref_vs_Scramble, method = "bonferroni")
+results$FDR_Alt_vs_Scramble <- p.adjust(results$PVal_Alt_vs_Scramble, method = "bonferroni")
+results$MPRA_Sig <- "N"
+results$MPRA_Sig[which(results$FDR_Ref_vs_Alt <= 0.01 & (results$FDR_Ref_vs_Scramble <= 0.01 | results$FDR_Alt_vs_Scramble <= 0.01))] <- "Y"
+# Write results to CSV
+write.csv(results, "combined_results.csv", row.names = FALSE)
+```
+
+Boxplots;
+
+```{r}
+# Load necessary library
+library(ggplot2)
+
+# Subset the data and set the order for Type_Strand
+MPRA_subset <- filtered_data[which(filtered_data$Variant == 'rs37005' & filtered_data$CellLine == "PANC1"),]
+MPRA_subset$Type_Strand <- factor(MPRA_subset$Type_Strand, levels = c("ref_fwd", "ref_rev", "alt_fwd", "alt_rev", "scramble_fwd", "scramble_rev"))
+
+# Create the box plot with the sorted order of Type_Strand
+ggplot(data = MPRA_subset) +
+  geom_violin(aes(x = Type_Strand, y = Ratio, fill = Type)) +
+  xlab("MPRA Construct") +
+  ylab("RNA/DNA Ratio") +
+  theme_minimal()
+
+```
+
+
+ Correlation Plots
+
+```{r}
+library(ggplot2)
+library(ggpubr)
+
+# Set the working directory
+setwd("/Users/obriena2/Documents/Thesis/Figures/")
+
+# Filter the cell lines you are interested in
+unique_cell_lines <- c("PANC1", "MP2", "293T")
+filtered_cell_lines <- filtered_data[filtered_data$CellLine %in% unique_cell_lines, ]
+
+# Loop through each unique cell line
+for(cell in unique_cell_lines) {
+  
+  # Initialize list to hold plots
+  plot_list <- list()
+  
+  # Subset the data for the current cell line
+  subset_data <- subset(filtered_cell_lines, CellLine == cell)
+  
+  # Get unique transfections for the subsetted data
+  unique_transfections <- unique(subset_data$Transfection)
+  
+  # Skip if fewer than 2 unique transfections
+  if(length(unique_transfections) < 2) {
+    next
+  }
+  
+  # Generate all 2-way combinations of unique transfections
+  combinations <- combn(unique_transfections, 2)
+  
+  # Loop through each 2-way combination to make the plots
+  for(i in 1:ncol(combinations)) {
+    transfection1 <- combinations[1, i]
+    transfection2 <- combinations[2, i]
+    
+    df1 <- subset(subset_data, Transfection == transfection1)
+    df2 <- subset(subset_data, Transfection == transfection2)
+    
+    # Merge the two data frames by Tag
+    combined_data <- merge(df1, df2, by = "Tag")
+    
+    # Calculate correlation
+    results <- cor.test(log2(combined_data$Ratio.x + 1), log2(combined_data$Ratio.y + 1), method = "pearson")
+    
+# Create the plot
+p <- ggplot(data = combined_data, aes(x = log2(Ratio.x + 1), y = log2(Ratio.y + 1))) +
+  geom_hex() +
+  scale_fill_gradientn(colours = topo.colors(10)) +
+  annotate("text", x = 1, y = 3, label = paste(transfection1, "vs", transfection2)) +
+  annotate("text", x = 1, y = 2, label = paste("Pearson's R = ", round(results$estimate, 2))) +
+  theme_minimal() +
+  theme(axis.title.x = element_blank(), axis.title.y = element_blank()) +
+  scale_x_continuous(limits = c(0, 3.5)) +
+  scale_y_continuous(limits = c(0, 3.5))
+      
+    
+    # Add to the list of plots
+    plot_list[[length(plot_list) + 1]] <- p
+  }
+  
+  # Combine plots into a grid with a common legend
+  if (length(plot_list) > 0) {
+    arranged_plot <- ggarrange(plotlist = plot_list, ncol = 2, nrow = ceiling(length(plot_list) / 2), 
+                              common.legend = TRUE, 
+                              legend = "bottom",)
+    
+    # Add common x and y labels
+    arranged_plot <- annotate_figure(arranged_plot, 
+                   top = text_grob(paste0(cell, " Transfections"), face = "bold", size = 14),
+                   bottom = text_grob("log2 RNA TPM/DNA TPM", size = 10),
+                   left = text_grob("log2 RNA TPM/DNA TPM", rot = 90, size = 10))
+    
+    # Save to PDF
+    pdf(paste0(cell,"_correlation_plots.pdf"))
+    print(arranged_plot)
+    dev.off()
+  }
+}
+
+```
+
+Volcano Plots
+
+
+```{r}
+# Load ggrepel package
+library(ggrepel)
+
+# Initialize empty lists for storing results
+averages_scramble_ratio_list <- list()
+results_list <- list()
+
+# Initialize list to hold plots
+volcano_plot_list <- list()
+
+# Loop through each unique cell line
+for (cell_line in unique(filtered_data$CellLine)) {
+  
+  # Calculate and store average ratio for "scramble" type
+  avg <- mean(subset(filtered_data, CellLine == cell_line & Type == "scramble")$Ratio, na.rm = TRUE)
+  averages_scramble_ratio_list[[length(averages_scramble_ratio_list) + 1]] <- data.frame(CellLine = cell_line, Average = avg)
+  
+  # Subset data for current cell line
+  data_subset <- subset(filtered_data, CellLine == cell_line)
+  
+  # Loop through each unique variant (SNP)
+  for (snp in unique(data_subset$Variant)) {
+    snp_data <- subset(data_subset, Variant == snp)
+    
+    # Calculate the Alt/Ref ratio
+    ref_val <- mean(subset(snp_data, Type == "ref")$Ratio, na.rm = TRUE)
+    alt_val <- mean(subset(snp_data, Type == "alt")$Ratio, na.rm = TRUE)
+    log2_ratio_alt_vs_ref <- ifelse(ref_val == 0, NA, log2(alt_val / ref_val))
+    
+    # Initialize variables to hold results
+    log2fc_ref_vs_alt <- log2fc_ref_vs_scramble <- log2fc_alt_vs_scramble <- NA
+    pval_ref_vs_alt <- pval_ref_vs_scramble <- pval_alt_vs_scramble <- NA
+    
+    # Fit GLMs and collect results
+    for (pair in list(c("ref", "alt"), c("ref", "scramble"), c("alt", "scramble"))) {
+      fit <- tryCatch(glm(Ratio ~ Type + Strand + Transfection, data = subset(snp_data, Type %in% pair)),
+                     error = function(e) return(NULL))
+      
+      if (!is.null(fit)) {
+        coef <- summary(fit)$coefficients[2, ]
+        log2fc <- coef[1]
+        pval <- coef[4]
+      } else {
+        log2fc <- pval <- NA
+      }
+      
+      if (all(pair == c("ref", "alt"))) {
+        log2fc_ref_vs_alt <- log2fc
+        pval_ref_vs_alt <- pval
+      } else if (all(pair == c("ref", "scramble"))) {
+        log2fc_ref_vs_scramble <- log2fc
+        pval_ref_vs_scramble <- pval
+      } else if (all(pair == c("alt", "scramble"))) {
+        log2fc_alt_vs_scramble <- log2fc
+        pval_alt_vs_scramble <- pval
+      }
+    }
+    
+    # Combine results into a single row and add to the results list
+    results_list[[length(results_list) + 1]] <- data.frame(
+      CellLine = cell_line,
+      Variant = snp,
+      Log2_Ratio_Alt_vs_Ref = log2_ratio_alt_vs_ref,
+      Log2FC_Ref_vs_Alt = log2fc_ref_vs_alt,
+      PVal_Ref_vs_Alt = pval_ref_vs_alt,
+      Log2FC_Ref_vs_Scramble = log2fc_ref_vs_scramble,
+      PVal_Ref_vs_Scramble = pval_ref_vs_scramble,
+      Log2FC_Alt_vs_Scramble = log2fc_alt_vs_scramble,
+      PVal_Alt_vs_Scramble = pval_alt_vs_scramble
+    )
+  }
+}
+
+# Convert the list of data frames to a single data frame
+results <- do.call(rbind, results_list)
+averages_scramble_ratio <- do.call(rbind, averages_scramble_ratio_list)
+
+# Continue with the rest of your code (P-value adjustment, etc.)
+# ...
+# P-value adjustment
+results$FDR_Ref_vs_Alt <- p.adjust(results$PVal_Ref_vs_Alt, method = "bonferroni")
+results$FDR_Ref_vs_Scramble <- p.adjust(results$PVal_Ref_vs_Scramble, method = "bonferroni")
+results$FDR_Alt_vs_Scramble <- p.adjust(results$PVal_Alt_vs_Scramble, method = "bonferroni")
+
+# Classifying significance
+results$MPRA_Sig <- "N"
+results$MPRA_Sig[which(results$FDR_Ref_vs_Alt <= 0.01 & (results$FDR_Ref_vs_Scramble <= 0.01 | results$FDR_Alt_vs_Scramble <= 0.01))] <- "Y"
+
+# Write results to CSV
+write.csv(results, "combined_results.csv", row.names = FALSE)
+
+# Generate volcano plots
+library(ggplot2)
+
+# Loop through each unique cell line
+for(cell_line in unique(results$CellLine)) {
+  
+  # Subset the data for the current cell line
+  subset_results <- subset(results, CellLine == cell_line)
+  
+ # Create the volcano plot for Alt/Ref ratio
+  volcano_plot <- ggplot(subset_results, aes(x = Log2_Ratio_Alt_vs_Ref, y = log10(-log10(PVal_Ref_vs_Alt)))) +
+  geom_hline(yintercept = log10(-log10(0.01)), linetype = "dashed") +
+  geom_point(aes(color = MPRA_Sig), alpha = 0.6, size = 3) +
+  geom_text_repel(data = subset(subset_results, Variant %in% c("rs421629", "rs31487", "rs37005", "rs11133729")),
+                  aes(label = Variant), nudge_y = 0.2, box.padding = 0.5, point.padding = 0.3) +
+  theme_minimal() +
+  scale_color_manual(name = "MPRA Functional",
+                     values = c("Y" = "brown1", "N" = "cyan")) +
+  labs(title = cell_line,
+       x = "Log2(Alt/Ref Ratio)",
+       y = "log10(-log10(FDR))") +
+   theme(plot.title = element_text(hjust = 0.5))
+  # Add the plot to the list
+  volcano_plot_list[[length(volcano_plot_list) + 1]] <- volcano_plot
+}
+```
+
+```{r}
+volcano_plot_list
+```
+
+
+Now I want to make the same volcano plots, only this time colouring by credible set, and shaping by intersect with a CRISPRi peak
+
+```{r}
+CRISPR_CSs <- read.table(file = "/Volumes/Group06/LTG/Amundadottir Lab/Aidan/MPRA/MPRA_regression_master/5p15/CRISPRi_intersect_MPRA_CS.txt", header =T, sep = "\t")
+
+```
+
+```{r}
+# Assuming 'results' is your main results dataframe
+# and 'CRISPR_CSs' contains the CRISPR information
+
+# Merge CRISPR information with the results dataframe
+results_with_crispr <- merge(results, CRISPR_CSs, by.x = "Variant", by.y = "MarkerName", all.x = TRUE)
+
+# Fill NA values in 'Credible.Set' and 'CRISPRi' with 'Not in CS' and 'None' respectively
+results_with_crispr$Credible.Set <- ifelse(is.na(results_with_crispr$Credible.Set), "Not in CS", results_with_crispr$Credible.Set)
+results_with_crispr$CRISPRi <- ifelse(is.na(results_with_crispr$CRISPRi), "None", results_with_crispr$CRISPRi)
+
+# Alternatively, using tidyr::replace_na()
+results_with_crispr <- results_with_crispr %>%
+  replace_na(list(Credible.Set = ".", CRISPRi = "Not CRISPRi Significant"))
+
+# Now, adjust the plotting code to include these changes
+
+library(ggplot2) # Make sure ggplot2 is loaded
+
+# Initailise a new list
+
+volcano_plot_list <- list()
+# Loop through each unique cell line
+for(cell_line in unique(results_with_crispr$CellLine)) {
+  
+  # Subset the data for the current cell line
+  subset_results <- subset(results_with_crispr, CellLine == cell_line)
+  
+  # Create the volcano plot for Alt/Ref ratio
+  volcano_plot <- ggplot(subset_results, aes(x = Log2_Ratio_Alt_vs_Ref, y = log10(-log10(PVal_Ref_vs_Alt)))) +
+    geom_hline(yintercept = log10(-log10(0.01)), linetype = "dashed") +
+    geom_point(aes(color = Credible.Set, shape = CRISPRi), alpha = 0.6, size = 3) +
+    scale_shape_manual(name = "CRISPRi", values = c("Both" = 15, "MIA PaCa-2" = 16, "PANC-1" = 17, "None" = 18)) + # Adjust as per your CRISPRi categories
+    geom_text_repel(data = subset(subset_results, Variant %in% c("rs421629", "rs31487", "rs11133729")),
+                  aes(label = Variant), nudge_y = 0.2, box.padding = 0.5, point.padding = 0.3) +
+
+    scale_color_brewer(name = "Credible Set", palette = "Dark2") + # Adjust color palette as needed
+    theme_minimal() +
+    labs(title = cell_line,
+         x = "Log2(Alt/Ref Ratio)",
+         y = "-log10(PVal_Ref_vs_Alt)") +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  # Add the plot to the list
+  volcano_plot_list[[length(volcano_plot_list) + 1]] <- volcano_plot
+}
+
+# Your plots are now ready and stored in 'volcano_plot_list'
+volcano_plot_list
+```
+
+Make a Panel
+```{r}
+# Set axis limits
+x_limits <- c(-2, 2)  # Replace with your specific x-axis limits
+y_limits <- c(-2.5, 2.5)  # Replace with your specific y-axis limits
+
+# Extract plots 1, 8, and 9 from the list and set axis limits
+plot_1 <- volcano_plot_list[[1]] + xlim(x_limits) + ylim(y_limits) + theme(axis.title.x = element_blank(), axis.title.y = element_blank())
+plot_8 <- volcano_plot_list[[8]] + xlim(x_limits) + ylim(y_limits) + theme(axis.title.x = element_blank(), axis.title.y = element_blank())
+plot_9 <- volcano_plot_list[[9]] + xlim(x_limits) + ylim(y_limits) + theme(axis.title.x = element_blank(), axis.title.y = element_blank())
+
+# Arrange the plots
+combined_plot <- ggarrange(plot_1, plot_8, plot_9,
+                           ncol = 1, nrow = 3)
+
+# Add common x and y axis labels
+combined_plot <- annotate_figure(combined_plot, 
+                                 top = text_grob(""),
+                                 bottom = text_grob("Log2(Alt/Ref Ratio)", rot = 0, size = 14),
+                                 left = text_grob("log10(-log10(P Value))", rot = 90, size = 14)
+                                )
+
+# Save the combined plot
+pdf("/Users/obriena2/Documents/Thesis/Figures/Volcano_trio.pdf")
+plot(combined_plot)
+dev.off()
+```
+
+
