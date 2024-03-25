@@ -1,0 +1,1319 @@
+---
+title: "VNTR Analysis  March 24"
+output: html_notebook
+---
+
+Use this code to proces each sequencing set separately, gradually creating a master genotyping file
+ 
+NCI-02277806-ML:~ obriena2$ cd Analysis/
+NCI-02277806-ML:Analysis obriena2$ mkdir HapMap_PB_Nov23
+NCI-02277806-ML:Analysis obriena2$ cd HapMap_PB_Nov23/
+NCI-02277806-ML:HapMap_PB_Nov23 obriena2$ mkdir fasta
+NCI-02277806-ML:HapMap_PB_Nov23 obriena2$ cd fasta/
+NCI-02277806-ML:fasta obriena2$ cp /Volumes/ifs/DCEG/Projects/DataDelivery/laufey/RP0325-008_chr5p15.33_PacBio/str1/pbaa/*fasta .
+NCI-02277806-ML:fasta obriena2$ 
+
+Concatenated all the fasta files together
+
+cat fasta/*fasta > all.fasta
+
+removed white spaces from IDs
+
+sed -i '' 's/ /_/g' all.fasta 
+
+ran trf
+
+/Users/obriena2/trf409.macosx all.X.fasta 2 7 7 80 10 50 500 -f -d -m -h
+
+ran trf wrangler
+
+python3 /Users/obriena2/TRFdat_to_txt.py  --dat all.fasta.2.7.7.80.10.50.500.dat --txt all.fasta.2.7.7.80.10.50.500.txt
+
+created table of fasta files to integrate amplicons using seqkit fx2tab
+/Users/obriena2/seqkit fx2tab all_.fasta > all_fasta.tab
+
+This bit of code marks the haplotype of VNTR1 that might be functional on its own
+I want to condition on this and see what happens
+
+Command to open df in excel for a more hands on look at data
+
+```{r}
+library(openxlsx)
+
+ open_dataframe_in_excel <- function(df, file_name = "temp_dataframe.xlsx") {
+  # Save the dataframe to an Excel file
+  write.xlsx(df, file_name)
+
+  # Open the Excel file using the shell command
+  if (Sys.info()["sysname"] == "Windows") {
+    shell(paste("start", file_name), intern = TRUE)
+  } else if (Sys.info()["sysname"] == "Darwin") {
+    system(paste("open", file_name), intern = TRUE)
+  } else if (Sys.info()["sysname"] == "Linux") {
+    system(paste("xdg-open", file_name), intern = TRUE)
+  } else {
+    stop("Operating system not supported.")
+  }
+}
+
+```
+
+First off, load in sample IDs for all PB sequenced samples
+
+```{r}
+setwd("/Users/obriena2/Analysis/VNTR_Thesis_Analysis/")
+PB_Samples <- read.table(file = "PB_sequenced_samples.txt", header = T, sep = "\t")
+```
+
+```{r}
+# Load in the .dat.txt and fasta file to R
+library(dplyr)
+library(stringr)
+library(spgs)
+library(ggplot2)
+library(Biostrings)
+library(purrr)
+library(readr)
+library(hexbin) # Make sure to install this package
+library(patchwork)
+
+# Load in all 1000G, HM and PS12 trf data
+VNTR_genos_PS <- read.table(file = 'fasta/all_PanScan.fasta.2.7.7.80.10.50.500.txt', header = T)
+VNTR_genos_PS$Subset <- "PanScan"
+
+VNTR_genos_EUR <- read.table(file = 'fasta/all_EUR.fasta.2.7.7.80.10.50.500.txt', header = T)
+VNTR_genos_EUR$Subset <- "EUR"
+
+VNTR_genos_HM_old <- read.table(file = 'fasta/all_old_HM.fasta.2.7.7.80.10.50.500.txt', header = T)
+VNTR_genos_HM_old$Subset <- "HM_old"
+
+VNTR_genos_HM_new <- read.table(file = 'fasta/all_new_HM.fasta.2.7.7.80.10.50.500.txt', header = T)
+VNTR_genos_HM_new$Subset <- "HM_new"
+
+# All dfs now have 17 columns, and should be simple to rbind
+
+VNTR_genos <- rbind(VNTR_genos_PS, VNTR_genos_EUR, VNTR_genos_HM_old, VNTR_genos_HM_new)
+
+# Create columns for the data contained within the fasta headers;
+VNTR_genos$Cluster <- str_extract(VNTR_genos$Contig,"cluster-\\d") # Extract cluster info, important for capturing alleles
+table(VNTR_genos$Cluster)
+
+# Add a new column to VNTR_genos with matched Match_ID from PB_Samples
+VNTR_genos <- VNTR_genos %>%
+  mutate(Matched_ID = sapply(Contig, function(contig_entry) {
+    # Create a pattern string from all Match_IDs in PB_Samples
+    pattern <- paste(PB_Samples$Match_ID, collapse = "|")
+    # Extract the first match found in contig_entry using the pattern
+    match <- str_extract(contig_entry, pattern)
+    # Return the match, or NA if no match found
+    if (is.na(match)) { return(NA) } else { return(match) }
+  }))
+
+length(which(is.na(VNTR_genos$Matched_ID)))
+
+prob_samples <- read.table(file = "PanScanRun_problem_samples.txt", header = F)
+
+length(which(prob_samples$V1  %in% VNTR_genos$Matched_ID))
+# 48 of the flagged samples are present, remove from here
+
+VNTR_genos <- VNTR_genos %>%
+  filter(!Matched_ID %in% prob_samples$V1)
+
+```
+```{r}
+# Tidy up the df, define the VNTRs
+
+VNTR1_RU_FWD <- 'CATTCCATCCAGCTCCTCCTCTACAGACA'
+VNTR2_RU_FWD <- 'CTCTGCTTGGTGGACAGGGCCTCAGGACT'
+VNTR1_RU_REVCOMP <- 'CTGTAGAGGAGGAGCTGGATGGAATGTGT'
+VNTR2_RU_REVCOMP <- 'TGAGGCCCTGTCCACCAAGCAGAGAGTCC'
+
+VNTR_genos <- VNTR_genos %>%
+  filter(str_detect(Contig, "cluster-[01]")) %>%
+  mutate(ReadCount = str_extract(Contig, "ReadCount-\\d*")) %>%
+  mutate(ReadCount = as.numeric(str_extract(ReadCount, "\\d+"))) %>%
+  mutate(Length = abs(StartPos - EndPos)) %>%
+  group_by(Matched_ID) %>%
+  filter(!any(ReadCount < 30)) %>%
+  mutate(VNTR = case_when(
+      Motif == VNTR1_RU_FWD | Motif == VNTR1_RU_REVCOMP ~ 'VNTR1',
+      Motif == VNTR2_RU_FWD | Motif == VNTR2_RU_REVCOMP ~ 'VNTR2',
+      TRUE ~ NA_character_)) %>%
+  filter(!any(is.na(VNTR))) %>%
+  ungroup()
+
+```
+
+
+Look at assignment of VNTR alleles 
+
+```{r}
+VNTR_genos_unfiltered <- VNTR_genos
+
+# First plot with geom_point
+p1 <- ggplot(VNTR_genos_unfiltered, aes(x = `Entropy.0.2.`, y = Length, color = VNTR)) + 
+  geom_point() + 
+  theme_minimal() +
+  labs(title = "VNTR Length vs Entropy", x = "Entropy", y = "VNTR Length") +
+  scale_color_discrete(name = "VNTR Categories")
+
+# Second plot with geom_hex
+p2 <- ggplot(VNTR_genos_unfiltered, aes(x = `Entropy.0.2.`, y = Length)) + 
+  geom_hex() +  # Use geom_hex and fill based on density
+  theme_minimal() +
+  labs(title = "Hex Tile Density of VNTR Length vs Entropy", x = "Entropy", y = "VNTR Length")
+
+# Combine plots with patchwork
+combined_plot <- p1 + p2 + plot_layout(guides = 'collect') & 
+  scale_x_continuous(limits = c(1.5, 2)) & 
+  scale_y_continuous(limits = c(0, 5000))
+
+# Print the combined plot
+print(combined_plot)
+
+```
+
+```{r}
+VNTR_genos <- VNTR_genos %>%
+  group_by(Matched_ID, Subset, VNTR) %>%
+  arrange(desc(ReadCount), .by_group = TRUE) %>%
+  mutate(DiploidCopyNumber = ifelse(n() > 1,
+                                    paste(CopyNumber, lead(CopyNumber, default = CopyNumber[1]), sep = "|"),
+                                    paste(CopyNumber, CopyNumber, sep = "|"))) %>%
+  mutate(DiploidLength = ifelse(n() > 1,
+                                    paste(Length, lead(Length, default = Length[1]), sep = "|"),
+                                    paste(Length, Length, sep = "|"))) %>%
+  mutate(TotalCopyNumber = sum(CopyNumber)) %>%
+  ungroup()
+
+
+# Add an indicator as to how many rows per sample
+
+VNTR_genos <- VNTR_genos %>%
+  group_by(Matched_ID, VNTR) %>%
+  mutate(n_rows = n()) %>% # There are a subset of samples with more than one entry for each cluster, remove at this stage
+  ungroup() %>%
+  filter(n_rows <=2)
+
+table(VNTR_genos$n_rows)
+
+# find out how many unique sequences were 2873
+length_seq_check <- VNTR_genos %>%
+  filter(VNTR == "VNTR1") %>%
+  filter(Length == "2872")
+length(unique(length_seq_check$Sequence))
+```
+
+This chunk merges the VNTR TRF result rows with their corresponding fasta sequence of the entire amplicon, allowing me to identify SNP genotypes flanking and within the repeats
+
+```{r}
+## Need to add Subset to fasta.filtered before merging, did this manually in excel and bbedit
+fasta.filtered <- read.table(file = 'all_fasta.tab', header = F, sep = "\t")
+columntitles <- c('Contig','seq', 'Subset')
+colnames(fasta.filtered) <- columntitles
+fasta.filtered <- fasta.filtered[,c(1,2,3)]
+
+# find the matched ID from the contig in the fasta file
+
+# Add a new column to VNTR_genos with matched Match_ID from PB_Samples
+fasta.filtered <- fasta.filtered %>%
+  mutate(Matched_ID = sapply(Contig, function(contig_entry) {
+    # Create a pattern string from all Match_IDs in PB_Samples
+    pattern <- paste(PB_Samples$Match_ID, collapse = "|")
+    # Extract the first match found in contig_entry using the pattern
+    match <- str_extract(contig_entry, pattern)
+    # Return the match, or NA if no match found
+    if (is.na(match)) { return(NA) } else { return(match) }
+  }))
+
+fasta.filtered$Cluster <- str_extract(fasta.filtered$Contig,"cluster-[01]")
+fasta.filtered$ID_Cluster_Subset <- paste(fasta.filtered$Matched_ID, fasta.filtered$Cluster, fasta.filtered$Subset, sep = "_")
+
+VNTR_genos$ID_Cluster_Subset <- paste(VNTR_genos$Matched_ID, VNTR_genos$Cluster, VNTR_genos$Subset, sep = "_")
+
+VNTR_genos <- merge(VNTR_genos, fasta.filtered[,c(2,6)], by = "ID_Cluster_Subset")
+
+```
+
+
+# This chunk searches the fasta sequences for intances of common SNP alleles in fwd or rev orientation
+
+```{r}
+SNPs <- read.table(file = "/Users/obriena2/Analysis/VNTR_imp_may23/amplicon_common_SNPs.txt", header = T)
+
+# Install and load necessary packages
+if(!require(Biostrings)) {install.packages("Biostrings", repos="http://bioconductor.org/packages/3.13/bioc"); library(Biostrings)}
+if(!require(dplyr)) {install.packages("dplyr"); library(dplyr)}
+
+# Function to find the reverse complement of a DNA sequence
+reverse_complement <- function(sequence) {
+  return(as.character(reverseComplement(DNAString(sequence))))
+}
+
+# Add reverse complements to the SNPs data frame
+SNPs$ref_revcomp <- sapply(SNPs$RefSeq, reverse_complement)
+SNPs$alt_revcomp <- sapply(SNPs$AltSeq, reverse_complement)
+
+# Initialize an empty matrix for the SNP genotypes
+SNP_genotypes <- matrix(NA, nrow = nrow(VNTR_genos), ncol = nrow(SNPs))
+colnames(SNP_genotypes) <- SNPs$rsID
+
+# Find whether each sequence contains each reference or alternate allele
+for(i in seq_len(nrow(VNTR_genos))) {
+  for(j in seq_len(nrow(SNPs))) {
+    if (grepl(SNPs$RefSeq[j], VNTR_genos$seq[i]) | grepl(SNPs$ref_revcomp[j], VNTR_genos$seq[i])) {
+      SNP_genotypes[i,j] <- 0
+    } else if (grepl(SNPs$AltSeq[j], VNTR_genos$seq[i]) | grepl(SNPs$alt_revcomp[j], VNTR_genos$seq[i])) {
+      SNP_genotypes[i,j] <- 1
+    } else {
+      SNP_genotypes[i,j] <- 'NA'
+    }
+  }
+}
+
+# Convert to data frame and bind to the original dataframe
+SNP_genotypes <- as.data.frame(SNP_genotypes)
+
+# Rename the columns of SNP_genotypes to match the SNP IDs
+names(SNP_genotypes) <- SNPs$name
+
+# Bind SNP_genotypes to the original dataframe
+VNTR_genos_with_SNPs <- cbind(VNTR_genos, SNP_genotypes)
+
+```
+
+Now plot a histogram showing distributions of various alleles with VNTR length on the Y axis
+
+```{r}
+
+V1_EUR <- ggplot(VNTR_genos_with_SNPs[which(VNTR_genos_with_SNPs$VNTR == "VNTR1" & VNTR_genos_with_SNPs$Subset != "PanScan"),], aes(x = Length, fill = rs11133729)) +
+  geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+  labs(x = "Length", y = "Count", title = "VNTR1 EUR") +
+  theme_minimal() +
+  xlim(2000, 4000)
+
+V1_PS <- ggplot(VNTR_genos_with_SNPs[which(VNTR_genos_with_SNPs$VNTR == "VNTR1" & VNTR_genos_with_SNPs$Subset == "PanScan"),], aes(x = Length, fill = rs11133729)) +
+  geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+  labs(x = "Length", y = "Count", title = "VNTR1 PanScan I & II") +
+  theme_minimal() +
+  xlim(2000, 4000)
+
+
+V2_EUR <- ggplot(VNTR_genos_with_SNPs[which(VNTR_genos_with_SNPs$VNTR == "VNTR2" & VNTR_genos_with_SNPs$Subset != "PanScan"),], aes(x = Length, fill = rs11133729)) +
+  geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+  labs(x = "Length", y = "Count", title = "VNTR2 EUR") +
+  theme_minimal()  +
+  xlim(400, 1500)
+
+V2_PS <- ggplot(VNTR_genos_with_SNPs[which(VNTR_genos_with_SNPs$VNTR == "VNTR2" & VNTR_genos_with_SNPs$Subset == "PanScan"),], aes(x = Length, fill = rs11133729)) +
+  geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+  labs(x = "Length", y = "Count", title = "VNTR2 PanScan I & II") +
+  theme_minimal() +
+  xlim(400, 1500)
+
+V1_EUR
+
+library(patchwork)
+pdf("/Users/obriena2/Documents/Thesis/Figures/VNTR1_VNTR2_rs11133729_plots.pdf")
+comb_plot_hist <- (V1_EUR + V1_PS) / (V2_EUR + V2_PS)
+comb_plot_hist
+dev.off()
+```
+
+THis next chunk is super important, generating binary indicators for each of the genotypes, be that LS, Length, Seq or the SNPs themselves
+The following function generates VNTR specific genotypes for regression analysis
+
+```{r}
+# Define a function with parameters for the dataframe, minimum percentile, maximum percentile, and percentile step
+add_percentile_indicators <- function(df, min_percentile, max_percentile, step) {
+  
+  # Extract unique VNTR types from the dataframe
+  vntr_types <- unique(df$VNTR)
+  
+  # Initialize an empty dataframe to store results
+  result_df <- data.frame()
+  
+  # Iterate over each VNTR type
+  for (vntr_type in vntr_types) {
+    # Filter the dataframe for the current VNTR type
+    temp_df <- df %>%
+      filter(VNTR == vntr_type)
+    
+    # Create a sequence of percentiles to evaluate
+    percentiles <- seq(min_percentile, max_percentile, by = step)
+    # Calculate the CopyNumber thresholds for each percentile
+    thresholds <- sapply(percentiles, function(p) quantile(temp_df$CopyNumber, probs = p / 100))
+    
+    # Prefix column names with VNTR type and percentile
+    names(thresholds) <- paste0("LS_", vntr_type, "_", percentiles)
+
+    # For each threshold, add a binary indicator column to temp_df
+    for (name in names(thresholds)) {
+      temp_df <- temp_df %>%
+        mutate(!!name := if_else(CopyNumber >= thresholds[[name]], 1, 0))
+    }
+    
+    # Append temp_df to the result_df
+    result_df <- bind_rows(result_df, temp_df)
+  }
+
+  # Return the modified dataframe
+  return(result_df)
+}
+
+# Function to add binary indicators based on sequence length
+add_length_indicators <- function(df) {
+  
+  # Extract unique VNTR types
+  vntr_types <- unique(df$VNTR)
+  result_df <- data.frame()
+
+  # Iterate over each VNTR type
+  for (vntr_type in vntr_types) {
+    # Filter the dataframe for the current VNTR type
+    temp_df <- df %>%
+      filter(VNTR == vntr_type)
+
+    # Get unique sequence lengths
+    unique_lengths <- unique(nchar(temp_df$Sequence))
+
+    # For each unique length, add a binary indicator column
+    for (length in unique_lengths) {
+      col_name <- paste0("Length_", vntr_type, "_", length)
+      if (!col_name %in% colnames(temp_df)) {
+        temp_df[[col_name]] <- as.integer(nchar(temp_df$Sequence) == length)
+      }
+    }
+    
+    # Append temp_df to the result_df
+    result_df <- bind_rows(result_df, temp_df)
+  }
+
+  # Return the modified dataframe
+  return(result_df)
+}
+
+# Function to add binary indicators based on sequence presence
+add_sequence_indicators <- function(df) {
+  
+  vntr_types <- unique(df$VNTR)
+  result_df <- data.frame()
+  sequence_identifiers <- data.frame()
+
+  for (vntr_type in vntr_types) {
+    temp_df <- df %>%
+      filter(VNTR == vntr_type)
+
+    # Get unique sequences and initialize an index dataframe for sequences
+    unique_sequences <- unique(temp_df$Sequence)
+    sequence_indexes <- data.frame(Sequence = unique_sequences, Length = nchar(unique_sequences), Index = 0)
+    
+    # Assign an index to each unique sequence, creating a column name including the index for duplicates
+    for (sequence in unique_sequences) {
+      length <- nchar(sequence)
+      current_index <- max(sequence_indexes[sequence_indexes$Length == length, "Index"]) + 1
+      sequence_indexes[sequence_indexes$Sequence == sequence, "Index"] <- current_index
+
+      # Construct column name, handling first occurrence and subsequent duplicates
+      if (current_index == 1) {
+        col_name <- paste0("Seq_", vntr_type, "_", length)
+      } else {
+        col_name <- paste0("Seq_", vntr_type, "_", length, "_", current_index)
+      }
+
+      # Add binary indicator column if it doesn't exist
+      if (!col_name %in% colnames(temp_df)) {
+        temp_df[[col_name]] <- as.integer(temp_df$Sequence == sequence)
+      }
+      
+      # Collect sequence identifiers and corresponding column names
+      sequence_identifiers <- rbind(sequence_identifiers, data.frame(Identifier = col_name, Sequence = sequence))
+    }
+
+    # Append temp_df to result_df
+    result_df <- bind_rows(result_df, temp_df)
+  }
+  
+  # Return both the modified dataframe and the sequence identifiers
+  return(list(result_df, sequence_identifiers))
+}
+
+# Master function to process the dataframe with the defined transformations
+process_data <- function(df, result_df_master, min_percentile, max_percentile, step) {
+  # Apply percentile indicators
+  df <- add_percentile_indicators(df, min_percentile, max_percentile, step)
+  # Apply length indicators
+  df <- add_length_indicators(df)
+  # Apply sequence indicators and select the first element of the returned list
+  df <- add_sequence_indicators(df)[[1]]
+  
+  # Extract column names starting with 'rs'
+  rs_cols <- grep("^rs", colnames(df), value = TRUE)
+  
+  # Return the processed dataframe
+  return(df)
+}
+```
+
+Look at how those genotypes look
+
+```{r}
+All_diploid <- process_data(VNTR_genos_with_SNPs, result_df_master, 0, 100, 1)
+
+# ggplot(All_diploid[which(All_diploid$VNTR == "VNTR1" & All_diploid$Subset != "PanScan"),], aes(x = Length, fill = as.character(LS_VNTR1_10))) +
+#   geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+#   labs(x = "Length", y = "Count", title = "VNTR1 EUR") +
+#   theme_minimal() +
+#   xlim(2000, 4000)
+# 
+# ggplot(All_diploid[which(All_diploid$VNTR == "VNTR1" & All_diploid$Subset != "PanScan"),], aes(x = Length, fill = as.character(LS_VNTR1_50))) +
+#   geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+#   labs(x = "Length", y = "Count", title = "VNTR1 EUR") +
+#   theme_minimal() +
+#   xlim(2000, 4000)
+# 
+# ggplot(All_diploid[which(All_diploid$VNTR == "VNTR1" & All_diploid$Subset != "PanScan"),], aes(x = Length, fill = as.character(LS_VNTR1_75))) +
+#   geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+#   labs(x = "Length", y = "Count", title = "VNTR1 EUR") +
+#   theme_minimal() +
+#   xlim(2000, 4000)
+# 
+# ggplot(All_diploid[which(All_diploid$VNTR == "VNTR1" & All_diploid$Subset != "PanScan"),], aes(x = Length, fill = as.character(LS_VNTR1_85))) +
+#   geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+#   labs(x = "Length", y = "Count", title = "VNTR1 EUR") +
+#   theme_minimal() +
+#   xlim(2000, 4000)
+
+
+
+##### LOOK AT INTERESTING VARIANTS
+
+
+
+# ggplot(All_diploid[which(All_diploid$VNTR == "VNTR1" & All_diploid$Subset == "PanScan"),], aes(x = Length, fill = as.character(Length_VNTR1_2873))) +
+#   geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+#   labs(x = "Length", y = "Count", title = "VNTR1 PanScan I & II") +
+#   theme_minimal() 
+# 
+# ggplot(All_diploid[which(All_diploid$VNTR == "VNTR1" & All_diploid$Subset == "PanScan"),], aes(x = Length, fill = as.character(Seq_VNTR1_2873_5))) +
+#   geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+#   labs(x = "Length", y = "Count", title = "VNTR1 PanScan I & II") +
+#   theme_minimal() 
+
+ggplot(All_diploid[which(All_diploid$VNTR == "VNTR1" & All_diploid$Subset == "PanScan"),], aes(x = Length, fill = as.character(LS_VNTR1_50))) +
+  geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+  labs(x = "Length", y = "Count", title = "VNTR1 PanScan I & II") +
+  theme_minimal() 
+
+ggplot(All_diploid[which(All_diploid$VNTR == "VNTR1" & All_diploid$Subset == "PanScan"),], aes(x = Length, fill = as.character(LS_VNTR1_85))) +
+  geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+  labs(x = "Length", y = "Count", title = "VNTR1 PanScan I & II") +
+  theme_minimal() 
+
+ggplot(All_diploid[which(All_diploid$VNTR == "VNTR2" & All_diploid$Subset == "PanScan"),], aes(x = Length, fill = as.character(LS_VNTR2_50))) +
+  geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+  labs(x = "Length", y = "Count", title = "VNTR1 PanScan I & II") +
+  theme_minimal() 
+
+ggplot(All_diploid[which(All_diploid$VNTR == "VNTR2" & All_diploid$Subset == "PanScan"),], aes(x = Length, fill = as.character(LS_VNTR2_85))) +
+  geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+  labs(x = "Length", y = "Count", title = "VNTR1 PanScan I & II") +
+  theme_minimal() 
+
+# ggplot(All_diploid[which(All_diploid$VNTR == "VNTR2" & All_diploid$Subset == "PanScan"),], aes(x = Length, fill = as.character(Length_VNTR2_872))) +
+#   geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+#   labs(x = "Length", y = "Count", title = "VNTR1 PanScan I & II") +
+#   theme_minimal() 
+# 
+# ggplot(All_diploid[which(All_diploid$VNTR == "VNTR2" & All_diploid$Subset == "PanScan"),], aes(x = Length, fill = as.character(Seq_VNTR2_843_3))) +
+#   geom_histogram(binwidth = 29, alpha = 0.6, position = "identity") +
+#   labs(x = "Length", y = "Count", title = "VNTR1 PanScan I & II") +
+#   theme_minimal() 
+```
+
+
+Now generate a VCF file, I want some r2 values along with an imputation reference
+```{r}
+VNTR_genos_with_SNPs <- merge(VNTR_genos_with_SNPs, PB_Samples, by.x = "Matched_ID", by.y = "Match_ID") # Making sure necessary IDs are attached for later matching with VCF files
+```
+
+Next step is to integrate VCF genotypes, the aim here is to assess SNP genotyping accuracy
+
+```{r}
+EUR_chr5_fam <- read.table(file = "VCF/1KGP_chr5_plink.fam", header = F)
+length(which(VNTR_genos_with_SNPs$VCF_ID %in% EUR_chr5_fam$V1))
+EUR_VCF_IDs <- PB_Samples$VCF_ID[which(PB_Samples$VCF_ID %in% EUR_chr5_fam$V1)]
+
+
+EUR_VNTR_genos <- VNTR_genos_with_SNPs %>%
+  filter(VCF_ID %in% EUR_VCF_IDs) %>%  # Filter for EUR samples
+  mutate(VNTR_ID_Subset = paste(VNTR, VCF_ID, Subset, sep = "_"))
+
+All_diploid <- process_data(VNTR_genos_with_SNPs, result_df_master, 0, 100, 1)
+
+All_EUR_All_diploid <- All_diploid %>%
+  filter(VCF_ID %in% EUR_VCF_IDs)#  Filter for EUR samples
+
+EUR_VNTR_genotypes <- process_data(EUR_VNTR_genos, result_df_master, 0, 100, 1)
+VCF_genos <- read.table(file = "/Users/obriena2/Analysis/VNTR_imp_may23/EUR_amplicon_SNPs_all_EUR.raw.txt", header = T)
+
+# Get list of columns that start with "rs"
+rs_cols <- grep("^rs", names(EUR_VNTR_genotypes), value = TRUE)
+
+# Initialize master result dataframe
+result_df_master <- data.frame()
+
+# Loop through each rs column
+for(rs in rs_cols) {
+  
+  print(paste("Processing:", rs))
+  
+  # Skip if column doesn't exist
+  if(!(rs %in% names(EUR_VNTR_genotypes))) {
+    print(paste("Skipping", rs, "due to nonexistence in VNTR_genos."))
+    next
+  }
+
+  # Create a temporary copy of VNTR_genos
+  temp_VNTR <- EUR_VNTR_genotypes
+
+  # Convert character data to numeric in VNTR_genos
+  temp_VNTR <- temp_VNTR %>%
+    mutate({{rs}} := as.numeric(as.character(.data[[rs]]))) %>%
+    group_by(VNTR_ID_Subset) %>%
+    mutate(PB_diploid = ifelse(n() == 1, 2 * .data[[rs]], sum(.data[[rs]], na.rm = TRUE))) %>%
+    ungroup() %>%
+    select(VCF_ID, PB_diploid) %>%
+    na.omit() %>%
+    distinct()
+
+  # Create a temporary copy of VCF_genos
+  temp_VCF <- VCF_genos
+  
+  # Skip if 'IID' or rs column doesn't exist or isn't numeric in VCF_genos
+  if(!(rs %in% names(temp_VCF)) || !is.numeric(temp_VCF[[rs]])) {
+    print(paste("Skipping", rs, "due to nonexistence or non-numeric data in VCF_genos."))
+    next
+  }
+  
+  # Calculate summed diploid genotype for rs data in VCF_genos
+  temp_VCF <- temp_VCF %>%
+    mutate({{rs}} := as.numeric(.data[[rs]])) %>%
+    group_by(IID) %>%
+    mutate(VCF_diploid = sum(.data[[rs]], na.rm = TRUE)) %>%
+    ungroup() %>%
+    select(IID, VCF_diploid) %>%
+    na.omit() %>%
+    distinct()
+
+  # Join the two data frames by CGR_ID and IID
+  result_df <- temp_VNTR %>%
+    merge(temp_VCF, by.x = "VCF_ID", by.y = "IID", all.x =T) %>%
+    mutate(rsID = rs)  # add the rsID to the dataframe
+
+# Calculate the concordance percentage
+concord <- result_df %>%
+   mutate(concordance = ifelse(is.na(PB_diploid) | is.na(VCF_diploid), NA, ifelse(PB_diploid == VCF_diploid, 1, 0))) %>%
+   group_by(rsID) %>%
+   summarise(concordance_pct = sum(concordance, na.rm = TRUE) / sum(!is.na(concordance)) * 100)
+
+# Merge concordance_pct into result_df
+result_df <- result_df %>%
+  left_join(concord, by = "rsID")
+
+# Add the result to the master dataframe
+result_df_master <- rbind(result_df_master, result_df)
+}
+
+# Add a column to result_df_master indicating the unphased binary genotype for each VCF SNP along with a mismatch column
+result_df_master <- result_df_master %>%
+  mutate(match = ifelse(PB_diploid == VCF_diploid, "Y", "N")) %>%
+  mutate(VCF_Genotype = ifelse(VCF_diploid == 0, "0/0", ifelse(VCF_diploid ==1, "0/1", "1/1")))
+
+print(result_df_master)
+
+concordance_summary <- result_df_master %>%
+  select(rsID, concordance_pct) %>%
+  distinct()
+
+concordance_summary
+
+rs465498_concord <- result_df_master %>%
+  filter(rsID == "rs465498")
+```
+
+Now do Concordance for PanScan Samples
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+
+PS_VCF_genos <- read.table(file = "/Users/obriena2/Analysis/VNTR_Thesis_Analysis/PS12_1000G.raw", header = T) 
+
+PS_VCF_IDs <- PB_Samples$Match_ID[which(PB_Samples$Match_ID %in% PS_VCF_genos$IID)]
+
+PS_VNTR_genos <- VNTR_genos_with_SNPs %>%
+  filter(Matched_ID %in% PS_VCF_IDs) %>%
+  mutate(VNTR_ID_Subset = paste(VNTR, Matched_ID, Subset, sep = "_"))
+
+PS_VNTR_genotypes <- process_data(PS_VNTR_genos, result_df_master, 0, 100, 1)
+
+# Get list of columns that start with "rs"
+rs_cols <- grep("^rs", names(PS_VNTR_genotypes), value = TRUE)
+
+# Initialize master result dataframe
+result_df_master <- data.frame()
+result_df <- data_frame()
+
+# Loop through each rs column
+for(rs in rs_cols) {
+  
+  print(paste("Processing:", rs))
+  
+  # Skip if column doesn't exist
+  if(!(rs %in% names(PS_VNTR_genotypes))) {
+    print(paste("Skipping", rs, "due to nonexistence in VNTR_genos."))
+    next
+  }
+
+  # Create a temporary copy of VNTR_genos
+  temp_VNTR <- PS_VNTR_genotypes
+
+  # Convert character data to numeric in VNTR_genos
+  temp_VNTR <- temp_VNTR %>%
+    mutate({{rs}} := as.numeric(as.character(.data[[rs]]))) %>%
+    group_by(VNTR_ID_Subset) %>%
+    mutate(PB_diploid = ifelse(n() == 1, 2 * .data[[rs]], sum(.data[[rs]], na.rm = TRUE))) %>%
+    ungroup() %>%
+    select(Matched_ID, PB_diploid) %>%
+    na.omit() %>%
+    distinct()
+
+  # Create a temporary copy of VCF_genos
+  temp_VCF <- PS_VCF_genos
+  
+  # Skip if 'IID' or rs column doesn't exist or isn't numeric in VCF_genos
+  if(!(rs %in% names(temp_VCF)) || !is.numeric(temp_VCF[[rs]])) {
+    print(paste("Skipping", rs, "due to nonexistence or non-numeric data in VCF_genos."))
+    next
+  }
+  
+  # Calculate summed diploid genotype for rs data in VCF_genos
+  temp_VCF <- temp_VCF %>%
+    mutate({{rs}} := as.numeric(.data[[rs]])) %>%
+    group_by(IID) %>%
+    mutate(VCF_diploid = sum(.data[[rs]], na.rm = TRUE)) %>%
+    ungroup() %>%
+    select(IID, VCF_diploid) %>%
+    na.omit() %>%
+    distinct()
+
+  # Join the two data frames by CGR_ID and IID
+  result_df <- temp_VNTR %>%
+    merge(temp_VCF, by.x = "Matched_ID", by.y = "IID", all.x =T) %>%
+    mutate(rsID = rs)  # add the rsID to the dataframe
+
+# Calculate the concordance percentage
+concord <- result_df %>%
+   mutate(concordance = ifelse(is.na(PB_diploid) | is.na(VCF_diploid), NA, ifelse(PB_diploid == VCF_diploid, 1, 0))) %>%
+   group_by(rsID) %>%
+   summarise(concordance_pct = sum(concordance, na.rm = TRUE) / sum(!is.na(concordance)) * 100)
+
+# Merge concordance_pct into result_df
+result_df <- result_df %>%
+  left_join(concord, by = "rsID")
+
+# Add the result to the master dataframe
+result_df_master <- rbind(result_df_master, result_df)
+}
+
+# Add a column to result_df_master indicating the unphased binary genotype for each VCF SNP along with a mismatch column
+result_df_master <- result_df_master %>%
+  mutate(match = ifelse(PB_diploid == VCF_diploid, "Y", "N")) %>%
+  mutate(VCF_Genotype = ifelse(VCF_diploid == 0, "0/0", ifelse(VCF_diploid ==1, "0/1", "1/1")))
+
+print(result_df_master)
+
+concordance_summary <- result_df_master %>%
+  select(rsID, concordance_pct) %>%
+  distinct()
+
+concordance_summary
+```
+
+Setup to run regression;
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# Assuming VNTR_diploid is your original dataframe
+# Select relevant columns and convert character columns to numeric where appropriate
+PS_genos_summarized <- All_diploid %>%
+  filter(Matched_ID %in% PS_VCF_IDs)%>%
+  select(Matched_ID, starts_with("rs"), starts_with("Length_"), starts_with("Seq_"), starts_with("LS_")) %>%
+  mutate(across(starts_with("rs"), as.numeric, na.rm = TRUE)) %>%
+  # No need to remove VNTR column if we're not filtering by VNTR type, just divide by 2
+  mutate(across(starts_with("rs"), ~ . / 2)) %>%
+  group_by(Matched_ID) %>%
+  summarise(across(everything(), sum, na.rm = TRUE)) %>%
+  ungroup() %>%
+  distinct()
+
+# If you need to distinguish between VNTR1 and VNTR2 related columns, ensure they're appropriately named/prefixed in the dataframe
+# No need for separate dataframes for VNTR1 and VNTR2 unless you're performing type-specific analyses later
+
+# Joining VNTR1 and VNTR2 related columns back with SNP columns is not necessary as they're not separated in this approach
+
+P12_pheno <- read.table(file = "/Volumes/ifs/DCEG/Branches/LTG/Amundadottir/PanScanIV_data/pheno/Panscan12_subject.def", header = T, sep = '\t')
+P12_ID_conv <- read.table(file = "/Volumes/ifs/DCEG/Branches/LTG/Amundadottir/PanScan2019/PanScan12_sample_ID_conversion_list.txt", header = F, sep = '\t')
+P12_ID_conv$CGR_ID <- str_extract(P12_ID_conv$V1,"^[SBC]*\\d*")
+colnames(P12_ID_conv) <- c("Contig", "TGS_ID", "CGR_ID")
+P12_ID_pheno <- merge(P12_ID_conv, P12_pheno, by = "TGS_ID", all.x = TRUE)
+P12_geno_pheno <- merge(P12_ID_pheno, PS_genos_summarized, by.x = "CGR_ID", by.y = "Matched_ID")
+```
+
+```{r}
+library(dplyr)
+
+# Assuming your dataframe is P12_geno_pheno
+# Identify columns for logistic regression
+genotype_columns <- names(P12_geno_pheno)[grepl("^(rs|Length_|Seq_|LS_)", names(P12_geno_pheno))]
+
+# Calculate Effect Allele Frequency for each variant
+# Initialize a vector to store EAF
+effect_allele_frequencies <- numeric(length = length(genotype_columns))
+names(effect_allele_frequencies) <- genotype_columns
+
+for(genotype in genotype_columns) {
+  allele_counts <- P12_geno_pheno %>% 
+                   select(!!sym(genotype)) %>% 
+                   unlist() %>% 
+                   as.numeric()
+  effect_allele_frequencies[genotype] <- sum(allele_counts) / (2 * nrow(P12_geno_pheno))
+}
+
+# Initialize a dataframe to store the results
+logistic_regression_results <- data.frame(Variant = character(), 
+                                          EffectSize = numeric(), 
+                                          PValue = numeric(),
+                                          EffectAlleleFrequency = numeric(),
+                                          stringsAsFactors = FALSE)
+
+# Loop through each genotype column and perform logistic regression
+for(genotype in genotype_columns) {
+  formula <- as.formula(paste("STATUS_CASE ~", genotype, " + FEMALE + AGE_LESS_51 + AGE_51_60 + AGE_71_80 + AGE_OVER_80 + STUDY_MDA + STUDY_JHU + EV1 + EV2 + EV3 + EV4 + EV5"))
+  model <- glm(formula, data = P12_geno_pheno, family = binomial)
+  
+  # Extract the coefficient and p-value for the genotype
+  coef_summary <- summary(model)$coefficients
+  # Find the correct row in the summary for the genotype
+  genotype_coef_name <- grep(genotype, rownames(coef_summary), value = TRUE)
+  if (length(genotype_coef_name) > 0) {
+    effect_size <- coef_summary[genotype_coef_name, "Estimate"]
+    p_value <- coef_summary[genotype_coef_name, "Pr(>|z|)"]
+
+    # Append the results to the dataframe
+    logistic_regression_results <- rbind(logistic_regression_results, 
+                                         data.frame(Variant = genotype, 
+                                                    EffectSize = effect_size, 
+                                                    PValue = p_value,
+                                                    EffectAlleleFrequency = effect_allele_frequencies[genotype]))
+  }
+}
+
+# The results, including Effect Allele Frequencies, are stored in logistic_regression_results
+
+```
+
+Generate Volcano Plot of LR results
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+
+# Assuming logistic_regression_results is already defined
+
+# Correctly categorize variants by their prefix
+logistic_regression_results$Category <- ifelse(grepl("^rs", logistic_regression_results$Variant), "SNP",
+                                                ifelse(grepl("^Length", logistic_regression_results$Variant), "VNTR Length",
+                                                       ifelse(grepl("^Seq", logistic_regression_results$Variant), "VNTR Sequence",
+                                                              ifelse(grepl("^LS_", logistic_regression_results$Variant), "Long/Short", "Other"))))
+
+# Add column indicating if VNTR1 or VNTR2
+logistic_regression_results$VNTR <- ifelse(grepl("VNTR1", logistic_regression_results$Variant), "VNTR1",
+                                           ifelse(grepl("VNTR2", logistic_regression_results$Variant), "VNTR2",
+                                                  "Other"))
+
+# Calculate -log10 of PValue for the plot
+logistic_regression_results$negLogPValue <- -log10(logistic_regression_results$PValue)
+
+# Indicate significant variants based on PValue
+logistic_regression_results$Significant <- logistic_regression_results$PValue <= 0.05
+
+# Identify the 5 lowest P-values and mark them for labeling
+logistic_regression_results <- logistic_regression_results %>%
+  arrange(PValue) %>%
+  mutate(LabelLowestP = row_number() <= 2)
+
+# Plot with a horizontal dashed line at the significance threshold
+
+pdf("/Users/obriena2/Documents/Thesis/Figures/PB_Regression_volcano.pdf")
+ggplot(logistic_regression_results, aes(x = EffectSize, y = negLogPValue)) +
+  geom_point(aes(color = Significant, shape = VNTR), size = 3) +
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "grey"),
+                     name = "Significance", labels = c("TRUE" = "P <= 0.05", "FALSE" = "P > 0.05")) +
+  scale_shape_manual(values = c("VNTR1" = 17, "VNTR2" = 18, "Other" = 16),
+                     name = "VNTR Type") +
+  geom_text_repel(data = subset(logistic_regression_results, LabelLowestP),
+                  aes(label = Variant), 
+                  box.padding = 0.35, point.padding = 0.5,
+                  size = 3, min.segment.length = 0.1) +
+  labs(x = "Effect Size", y = "-log10(P-Value)", title = "Volcano Plot of Logistic Regression Results") +
+  theme_minimal() +
+  theme(legend.position = "right") +
+  geom_hline(yintercept = 1.30103, linetype = "dashed", color = "blue")
+dev.off()
+
+
+```
+
+```
+
+
+
+```{r}
+# Load necessary library
+library(glm2)
+
+# Model 1: Without the SNP
+model_without_snp <- glm(STATUS_CASE ~ Seq_VNTR1_2873_5 + FEMALE + AGE_LESS_51 + AGE_51_60 + AGE_71_80 + AGE_OVER_80 + STUDY_MDA + STUDY_JHU + EV1 + EV2 + EV3 + EV4 + EV5, 
+                         data = P12_geno_pheno, 
+                         family = binomial)
+
+# Model 2: With the SNP
+model_with_snp <- glm(STATUS_CASE ~ LS_VNTR2_75 + rs11133729 + FEMALE + AGE_LESS_51 + AGE_51_60 + AGE_71_80 + AGE_OVER_80 + STUDY_MDA + STUDY_JHU + EV1 + EV2 + EV3 + EV4 + EV5, 
+                      data = P12_geno_pheno, 
+                      family = binomial)
+
+snp <- glm(STATUS_CASE ~ rs11133729 + FEMALE + AGE_LESS_51 + AGE_51_60 + AGE_71_80 + AGE_OVER_80 + STUDY_MDA + STUDY_JHU + EV1 + EV2 + EV3 + EV4 + EV5, 
+                      data = P12_geno_pheno, 
+                      family = binomial)
+
+
+
+
+# Summary of Model 1
+summary(model_without_snp)
+
+
+# Summary of Model 2
+summary(model_with_snp)
+
+```
+
+```{r}
+table(P12_geno_pheno$Seq_VNTR1_2873_5)
+
+ggplot(All_diploid[which(All_diploid$VNTR == "VNTR1"),], aes(x = Length, fill = as.character(Seq_VNTR1_2873_5))) +
+  geom_histogram(binwidth = 100, alpha = 0.6, position = "identity") +
+  labs(x = "Length", y = "Count", title = "Overlaying Histogram of Length by Binary Category") +
+  theme_minimal()
+```
+
+Gnereate VCF to impute VNTR into PS phases
+```{r}
+# Load the required libraries for data manipulation and reshaping
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+# The aim is to group instances of variants based on their sample ID, and cluster
+# This should provide the most simple and accurate phasing
+# Convert only the chosen columns to long format, including 'Cluster' and relevant sample IDs
+
+var_cols <- grep("^(Length_|Seq_|LS_|rs)", names(All_diploid), value = TRUE)
+
+All_diploid <- process_data(VNTR_genos_with_SNPs, result_df_master, 0, 100, 1)
+
+All_EUR_All_diploid <- All_diploid %>%
+  filter(VCF_ID %in% EUR_VCF_IDs)#  Filter for EUR samples
+
+
+EUR_VNTR_genotypes_condensed <- All_EUR_All_diploid %>%
+  select(VCF_ID, Cluster, Subset, VNTR, all_of(var_cols)) %>%
+  filter(VCF_ID %in% EUR_VCF_IDs) %>%#  Filter for EUR samples
+  filter(VNTR == "VNTR1") %>% # this removes doubling of genotypes, VNTR2 genotypes are retained
+  filter(!Subset == "HM_old") %>%
+  filter(!Subset == "PanScan")
+
+long_df <- EUR_VNTR_genotypes_condensed %>%
+  mutate_if(is.numeric, as.character) %>%
+  pivot_longer(cols = -c(VCF_ID, Cluster, Subset, VNTR), 
+               names_to = "Variant", 
+               values_to = "Genotype") %>%
+  mutate(Genotype = if_else(is.na(Genotype), ".", Genotype)) %>%
+  left_join(result_df_master %>% select(VCF_ID, rsID, match, VCF_Genotype), 
+            by = c("VCF_ID", "Variant" = "rsID")) %>%
+  mutate(Genotype = if_else(!str_starts(Variant, "rs") & Genotype == ".", "0", Genotype)) %>%
+  group_by(VCF_ID) %>%
+  mutate(PhaseSet = cur_group_id()) %>%
+  ungroup()
+
+
+# We now have a long format summary of all the SNP and VNTR genotypes
+# If a variant begins with rs and does not match the VCF, default to unphased VCF genotyp
+# If a variant begins with rs and matches VCF, Diploid genotype should be the phased PB genotype
+# If the variant is a VNTR identifier, phase all genotypes, setting "." to 0
+
+summarized_df <- long_df %>%
+  select(VCF_ID, PhaseSet, Variant, Cluster, match, VCF_Genotype, Genotype) %>%
+  arrange(VCF_ID, Variant, Cluster) %>%
+  group_by(VCF_ID, Variant) %>% 
+  summarize(
+    DiploidGenotype = case_when(
+      str_starts(Variant[1], "rs") & match[1] == "N" ~ VCF_Genotype[1], # Default to WGS when mismatched
+      str_starts(Variant[1], "rs") & match[1] == "Y" & n() == 2 ~ paste0(if_else(is.na(Genotype[1]), ".", Genotype[1]), "|", if_else(is.na(Genotype[2]), ".", Genotype[2])), 
+      str_starts(Variant[1], "rs") & match[1] == "Y" & n() == 1 ~ paste0(if_else(is.na(Genotype[1]), ".", Genotype[1]), "|", if_else(is.na(Genotype[1]), ".", Genotype[1])),
+      str_starts(Variant[1], "rs") & is.na(match[1]) & n() == 2 ~ paste0(if_else(is.na(Genotype[1]), ".", Genotype[1]), "|", if_else(is.na(Genotype[2]), ".", Genotype[2])),
+      str_starts(Variant[1], "rs") & is.na(match[1]) & n() == 1 ~ paste0(if_else(is.na(Genotype[1]), ".", Genotype[1]), "|", if_else(is.na(Genotype[1]), ".", Genotype[1])),
+      !str_starts(Variant[1], "rs") & n() == 2 ~ paste0(if_else(is.na(Genotype[1]), ".", Genotype[1]), "|", if_else(is.na(Genotype[2]), ".", Genotype[2])),
+      !str_starts(Variant[1], "rs") & n() == 1 ~ paste0(if_else(is.na(Genotype[1]), ".", Genotype[1]), "|", if_else(is.na(Genotype[1]), ".", Genotype[1]))
+    ),
+    PhaseSet = PhaseSet[1],
+    .groups = 'drop'
+  ) %>%
+  mutate(FinalGenotype = paste0(DiploidGenotype, ":", PhaseSet))
+
+
+wide_df <- summarized_df %>%
+  select(VCF_ID, Variant, FinalGenotype) %>%
+  spread(key = Variant, value = FinalGenotype) 
+
+# Transpose the data frame
+wide_df_t_matrix <- t(wide_df)
+
+# Convert the matrix back to a data frame
+wide_df_t <- as.data.frame(wide_df_t_matrix)
+
+transposed_df_VNTR1 <- wide_df %>%
+  gather(Variant, Value, -VCF_ID) %>%       # Convert data to long format
+  spread(VCF_ID, Value) %>%                 # Spread VCF_ID to columns
+  select(Variant, everything())             # Ensure Variant is the first column
+
+
+# The aim is to group instances of variants based on their sample ID, and cluster
+# This should provide the most simple and accurate phasing
+# Convert only the chosen columns to long format, including 'Cluster' and relevant sample IDs
+
+var_cols <- grep("^(Length_|Seq_|LS_|rs)", names(All_diploid), value = TRUE)
+
+EUR_VNTR_genotypes_condensed <- All_EUR_All_diploid %>%
+  select(VCF_ID, Cluster, Subset, VNTR, all_of(var_cols)) %>%
+  filter(VCF_ID %in% EUR_VCF_IDs) %>%#  Filter for EUR samples
+  filter(VNTR == "VNTR2") %>% # this removes doubling of genotypes, VNTR2 genotypes are retained
+  filter(!Subset == "HM_old") %>%
+  filter(!Subset == "PanScan")
+
+long_df <- EUR_VNTR_genotypes_condensed %>%
+  mutate_if(is.numeric, as.character) %>%
+  pivot_longer(cols = -c(VCF_ID, Cluster, Subset, VNTR), 
+               names_to = "Variant", 
+               values_to = "Genotype") %>%
+  mutate(Genotype = if_else(is.na(Genotype), ".", Genotype)) %>%
+  left_join(result_df_master %>% select(VCF_ID, rsID, match, VCF_Genotype), 
+            by = c("VCF_ID", "Variant" = "rsID")) %>%
+  mutate(Genotype = if_else(!str_starts(Variant, "rs") & Genotype == ".", "0", Genotype)) %>%
+  group_by(VCF_ID) %>%
+  mutate(PhaseSet = cur_group_id()) %>%
+  ungroup()
+
+
+# We now have a long format summary of all the SNP and VNTR genotypes
+# If a variant begins with rs and does not match the VCF, default to unphased VCF genotyp
+# If a variant begins with rs and matches VCF, Diploid genotype should be the phased PB genotype
+# If the variant is a VNTR identifier, phase all genotypes, setting "." to 0
+
+summarized_df <- long_df %>%
+  select(VCF_ID, PhaseSet, Variant, Cluster, match, VCF_Genotype, Genotype) %>%
+  arrange(VCF_ID, Variant, Cluster) %>%
+  group_by(VCF_ID, Variant) %>% 
+  summarize(
+    DiploidGenotype = case_when(
+      str_starts(Variant[1], "rs") & match[1] == "N" ~ VCF_Genotype[1], # Default to WGS when mismatched
+      str_starts(Variant[1], "rs") & match[1] == "Y" & n() == 2 ~ paste0(if_else(is.na(Genotype[1]), ".", Genotype[1]), "|", if_else(is.na(Genotype[2]), ".", Genotype[2])), 
+      str_starts(Variant[1], "rs") & match[1] == "Y" & n() == 1 ~ paste0(if_else(is.na(Genotype[1]), ".", Genotype[1]), "|", if_else(is.na(Genotype[1]), ".", Genotype[1])),
+      str_starts(Variant[1], "rs") & is.na(match[1]) & n() == 2 ~ paste0(if_else(is.na(Genotype[1]), ".", Genotype[1]), "|", if_else(is.na(Genotype[2]), ".", Genotype[2])),
+      str_starts(Variant[1], "rs") & is.na(match[1]) & n() == 1 ~ paste0(if_else(is.na(Genotype[1]), ".", Genotype[1]), "|", if_else(is.na(Genotype[1]), ".", Genotype[1])),
+      !str_starts(Variant[1], "rs") & n() == 2 ~ paste0(if_else(is.na(Genotype[1]), ".", Genotype[1]), "|", if_else(is.na(Genotype[2]), ".", Genotype[2])),
+      !str_starts(Variant[1], "rs") & n() == 1 ~ paste0(if_else(is.na(Genotype[1]), ".", Genotype[1]), "|", if_else(is.na(Genotype[1]), ".", Genotype[1]))
+    ),
+    PhaseSet = PhaseSet[1],
+    .groups = 'drop'
+  ) %>%
+  mutate(FinalGenotype = paste0(DiploidGenotype, ":", PhaseSet))
+
+
+wide_df <- summarized_df %>%
+  select(VCF_ID, Variant, FinalGenotype) %>%
+  spread(key = Variant, value = FinalGenotype) 
+
+# Transpose the data frame
+wide_df_t_matrix <- t(wide_df)
+
+# Convert the matrix back to a data frame
+wide_df_t <- as.data.frame(wide_df_t_matrix)
+
+transposed_df_VNTR2 <- wide_df %>%
+  gather(Variant, Value, -VCF_ID) %>%       # Convert data to long format
+  spread(VCF_ID, Value) %>%                 # Spread VCF_ID to columns
+  select(Variant, everything())             # Ensure Variant is the first column
+
+# Checking the transformed data
+```
+[obriena2@cn4300 Feb24]$ bgzip chr5_PB_filtered_with_VNTRs_SNP_filtered_sorted.vcf 
+[obriena2@cn4300 Feb24]$ bcftools index chr5_PB_filtered_with_VNTRs_SNP_filtered_sorted.vcf.gz 
+[obriena2@cn4300 Feb24]$ shapeit4.2 --input chr5_PB_filtered_with_VNTRs_SNP_filtered_sorted.vcf.gz --map chr5.b38.gmap.gz --region 5 --output chr5_PB_filtered_with_VNTRs_SNP_filtered_sorted_phased.vcf --use-PS 0.0001
+
+
+Make a reference based on PanScan
+
+
+finding dummy chr5 positions for alleles
+
+```{r}
+chr5_pos <- read.table(file = "/Users/obriena2/Analysis/VNTR_Thesis_Analysis/VCF/March24_analysis/chr5_pos_no_filter.txt", header = F)
+
+V1_pos <- chr5_pos %>%
+  filter(V1 >= 1326295 & V1 <=1329022)
+
+V1_dummy <- data.frame(
+  Pos = c(1326295:1329022),
+  chr ="chr5")
+
+length(which(V1_dummy$Pos %in% V1_pos$V1))
+
+V1_dummy <- V1_dummy %>%
+  filter(!Pos %in% V1_pos$V1)
+```
+
+Load in DR2 for all variants in PS12, compare to actual genotypes
+
+```{r}
+library(data.table)
+common_imp_raw <- fread(file = "/Users/obriena2/Analysis/VNTR_Thesis_Analysis/VCF/common_vs_all/P12_common_imputed.raw", header =T)
+
+common_imp_raw <- common_imp_raw %>%
+  select("IID", contains("VNTR"))  
+
+all_imp_raw <- fread(file = "/Users/obriena2/Analysis/VNTR_Thesis_Analysis/VCF/common_vs_all/P12_all_imputed.raw")
+
+all_imp_raw <- all_imp_raw %>%
+  select("IID", contains("VNTR"))  
+
+head(all_imp_raw[1:10])
+```
+
+```{r}
+PS_genos_summarized <- All_diploid %>%
+  filter(Matched_ID %in% PS_VCF_IDs)%>%
+  select(Matched_ID, starts_with("rs"), starts_with("Length_"), starts_with("Seq_"), starts_with("LS_")) %>%
+  mutate(across(starts_with("rs"), as.numeric, na.rm = TRUE)) %>%
+  # No need to remove VNTR column if we're not filtering by VNTR type, just divide by 2
+  mutate(across(starts_with("rs"), ~ . / 2)) %>%
+  group_by(Matched_ID) %>%
+  summarise(across(everything(), sum, na.rm = TRUE)) %>%
+  ungroup() %>%
+  distinct() %>%
+  select(Matched_ID, contains("VNTR")) %>%
+  mutate(Dataset = "PacBio")
+
+colnames(all_imp_raw) <- gsub("_G$", "", colnames(all_imp_raw))
+colnames(common_imp_raw) <- gsub("_G$", "", colnames(common_imp_raw))
+
+all_imp_raw <- all_imp_raw %>%
+  mutate(Matched_ID = str_extract(IID, "^[SCB]*\\d*")) %>%
+  mutate(Dataset = "all_imp") %>%
+  select(-IID)
+
+common_imp_raw <- common_imp_raw %>%
+  mutate(Matched_ID = str_extract(IID, "^[SCB]*\\d*")) %>%
+  mutate(Dataset = "common_imp")  %>%
+  select(-IID)
+
+PS_genos_PB_raw <- PS_genos_summarized %>%
+  select(Matched_ID, contains("VNTR"), Dataset)
+
+dim(PS_genos_PB_raw)
+dim(all_imp_raw)
+dim(common_imp_raw)
+
+PS_genos_PB_raw <- data.frame(PS_genos_PB_raw)
+all_imp_raw <- data.frame(all_imp_raw)
+common_imp_raw <- data.frame(common_imp_raw)
+# Order the columns consistently before rbinding
+
+desired_order <- c(colnames(PS_genos_PB_raw))
+all_imp_raw <- all_imp_raw[desired_order]
+common_imp_raw <- common_imp_raw[desired_order]
+
+imp_PB_comparison <- rbind(PS_genos_PB_raw, all_imp_raw, common_imp_raw)
+
+imp_PB_comparison_test <- imp_PB_comparison %>% # Create test dataframe before making comparisons
+  select(Matched_ID, Dataset, LS_VNTR1_75)
+
+imp_PB_comparison_test_wide <- imp_PB_comparison_test %>%
+  pivot_wider(id_cols = Matched_ID, names_from = "Dataset", values_from = "LS_VNTR1_75") %>%
+  filter(!is.na(PacBio))
+
+abs(cor(imp_PB_comparison_test_wide$PacBio, imp_PB_comparison_test_wide$common_imp, method = "pearson"))
+abs(cor(imp_PB_comparison_test_wide$PacBio, imp_PB_comparison_test_wide$all_imp, method = "pearson"))
+
+# Assuming pacbio_data and illumina_data are correctly aligned and are vectors of equal length
+
+# Load ggplot2
+library(ggplot2)
+
+
+# Generate the scatter plot with a regression line
+ggplot(imp_PB_comparison_test_wide, aes(x = PacBio, y = common_imp)) +
+  geom_point(alpha = 0.6) +  # Add points with slight transparency
+  theme_minimal() +  # Use a minimal theme
+  labs(title = "Correlation between PacBio and Illumina for LS_VNTR1_75",
+       x = "PacBio Variant LS_VNTR1_75",
+       y = "common Imp LS_VNTR1_75") +
+  theme(plot.title = element_text(hjust = 0.5))  # Center the plot title
+
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# Assuming imp_PB_comparison_test_wide is correctly structured
+# and has separate columns for each dataset's variant values
+
+# Ensure you have the correct structure
+variant_columns <- imp_PB_comparison %>%
+  select(-c(Matched_ID, Dataset))
+
+variant_columns <- names(variant_columns)
+# Initialize the dataframe to store correlation results
+correlation_results_df <- data.frame(Variant = character(),
+                                     Dataset_Comparison = character(),
+                                     Correlation = numeric(),
+                                     stringsAsFactors = FALSE)
+
+for (variant in variant_columns) {
+  temp_df <- imp_PB_comparison %>%
+    select(Matched_ID, Dataset, all_of(variant)) %>%
+    pivot_wider(id_cols = Matched_ID, names_from = Dataset, values_from = variant) %>%
+    filter(!is.na(PacBio)) # Ensure PacBio data is available
+
+  # Calculate correlations if columns exist
+  if ("PacBio" %in% names(temp_df) && "common_imp" %in% names(temp_df)) {
+    PB_vs_Common <- abs(cor(temp_df$PacBio, temp_df$common_imp, use = "complete.obs", method = "pearson"))
+    correlation_results_df <- rbind(correlation_results_df, 
+                                    data.frame(Variant = variant, 
+                                               Dataset_Comparison = "PacBio_vs_Common", 
+                                               Correlation = PB_vs_Common))
+  }
+  
+  if ("PacBio" %in% names(temp_df) && "all_imp" %in% names(temp_df)) {
+    PB_vs_All <- abs(cor(temp_df$PacBio, temp_df$all_imp, use = "complete.obs", method = "pearson"))
+    correlation_results_df <- rbind(correlation_results_df, 
+                                    data.frame(Variant = variant, 
+                                               Dataset_Comparison = "PacBio_vs_All", 
+                                               Correlation = PB_vs_All))
+  }
+}
+
+# Sort the results by Correlation in descending order for better readability
+correlation_results_df <- correlation_results_df %>%
+  arrange(desc(Correlation))
+
+# Display the first few rows of the results to confirm
+print(head(correlation_results_df))
+
+```
+
+Load in allele frequencies to viz ferq vs R2
+```{r}
+VNTR_freqs <- read.table(file = "/Users/obriena2/Analysis/VNTR_Thesis_Analysis/VCF/common_ref/plink2.afreq", header =F)
+
+VNTR_freqs <- VNTR_freqs %>%
+  select(V2, V5)
+colnames(VNTR_freqs) <- c("Variant", "Freq")
+
+DR2_summary <- read.table(file = "/Users/obriena2/Analysis/VNTR_Thesis_Analysis/VCF/DR2_summary.txt", header = T, sep = "\t")
+DR2_summary <- DR2_summary %>%
+  select(Variant, All.Imputed, Common.Imputed )
+colnames(DR2_summary) <- c("Variant", "DR2_all", "DR2_common")
+
+head(VNTR_freqs)
+head(DR2_summary)
+
+# Merge correlation_results_df with VNTR_freqs and DR2_summary based on "Variant"
+freq_DR2_conc_summary <- correlation_results_df %>%
+  left_join(VNTR_freqs, by = "Variant") %>%
+  left_join(DR2_summary, by = "Variant") %>%
+  mutate(Freq = ifelse(Freq > 0.5, 1 - Freq, Freq))  # Adjust Freq values
+```
+
+```{r}
+# Generate the scatter plot with a regression line
+Concordance_plot <-  ggplot(freq_DR2_conc_summary[freq_DR2_conc_summary$Dataset_Comparison == "PacBio_vs_Common",], aes(x = Freq, y = Correlation)) +
+  geom_point(alpha = 0.6) +  # Add points with slight transparency
+  theme_minimal() +  # Use a minimal theme
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Allele Frequency ~ Imputation Concordance",
+       x = "1000G EUR VNTR1/VNTR2 Minor Allele Frequency",
+       y = "Imputed Concordance in PacBio Genotyped PanScan Samples")
+# Center the plot title
+
+# Generate the scatter plot with a regression line
+Estimated_R2_plot <-  ggplot(freq_DR2_conc_summary[freq_DR2_conc_summary$Dataset_Comparison == "PacBio_vs_Common",], aes(x = Freq, y = DR2_common)) +
+  geom_point(alpha = 0.6) +  # Add points with slight transparency
+  theme_minimal() +  # Use a minimal theme
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Allele Frequency ~ Imputation Estimated R2",
+       x = "1000G EUR VNTR1/VNTR2 Minor Allele Frequency",
+       y = "PanScan Imputation DR2")
+
+library(patchwork)
+
+combined_acc_plot <- Estimated_R2_plot/Concordance_plot
+pdf("/Users/obriena2/Documents/Thesis/Figures/Imputation_accuracy_plot.pdf")
+combined_acc_plot
+dev.off()
+
+# Generate the scatter plot with a regression line
+Concordance_plot <-  ggplot(freq_DR2_conc_summary[freq_DR2_conc_summary$Dataset_Comparison == "PacBio_vs_Common",], aes(x = Freq, y = Correlation)) +
+  geom_point(alpha = 0.6) +  # Add points with slight transparency
+  theme_minimal() +  # Use a minimal theme
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = "Allele Frequency ~ Imputation Concordance",
+       x = "1000G EUR VNTR1/VNTR2 Minor Allele Frequency",
+       y = "Imputed Concordance in PacBio Genotyped PanScan Samples")
+```
+
+#### GTEx Imputation
+```{r}
+adipose_test <- read.csv(file = "/Users/obriena2/Analysis/VNTR_Thesis_Analysis/GTEx/tensorQTL/tensorqtl_eQTL_out/csv/Adipose_Subcutaneous.v8.cis_qtl_pairs.chr5.csv")
+
+skin_non_sub_nom <- read.csv(file = "/Users/obriena2/Analysis/VNTR_Thesis_Analysis/GTEx/tensorQTL/tensorqtl_eQTL_out/csv/Skin_Not_Sun_Exposed_Suprapubic.v8.cis_qtl_pairs.chr5.csv")
+
+library(tidyverse)
+skin_non_sub_nom_CLPTM1L <- skin_non_sub_nom %>%
+  filter(str_detect(phenotype_id, "ENSG00000049656"))
+
+
+library(coloc)
+```
+Load in meta results for volcano plot
+
+
+
