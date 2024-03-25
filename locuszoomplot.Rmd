@@ -1,0 +1,39 @@
+---
+title: "topR"
+output: html_notebook
+---
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("ensembldb")
+BiocManager::install("EnsDb.Hsapiens.v75")
+install.packages("locuszoomr")
+```
+
+```{r}
+GWAS <- read.table(file = "/Users/obriena2/Documents/Thesis/Figures/1KG.META.PanScan-PC4.v4.delivery.012720.tbl", header = T)
+```
+
+```{r}
+library(locuszoomr)
+library(dplyr)
+library(tidyverse)
+library(EnsDb.Hsapiens.v75)
+library(stringr)
+
+GWAS_plot <- GWAS %>%
+  dplyr::select(MarkerName, Chromosome, Position, P.value, Allele1, Allele2, Effect, StdErr) %>%
+  dplyr::filter(Chromosome == 5) %>%
+  dplyr::filter(str_detect(MarkerName, "^rs"))
+
+loc <- locus(GWAS_plot, ens_db = "EnsDb.Hsapiens.v75", gene = "CLPTM1L", p = "P.value", labs = "MarkerName")
+loc <- link_LD(loc, token = "4a654387c1de", pop = c("CEU", "GBR", "IBS", "TSI", "FIN"),)
+
+
+pdf("/Users/obriena2/Documents/Thesis/Code & Scripts/PanScanPac4_meta.pdf")
+locus_plot(loc, labels = c("index", "rs35226131", "rs2736098", "rs451360", "rs2853677", "rs36115365"), label_x = c(10, -10), )
+dev.off()
+```
+
+

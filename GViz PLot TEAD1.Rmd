@@ -1,0 +1,69 @@
+---
+title: "GViz Progenitor"
+output: html_notebook
+---
+
+```{r}
+library(Gviz)
+library(GenomicRanges)
+library(rtracklayer)
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(Homo.sapiens)
+library(bedr)
+library(GenomicInteractions)
+library(InteractionSet)
+library(Chicago)
+library(tidyverse)
+library()
+```
+
+plot GViz with progenitor
+
+```{r}
+library(Gviz)
+chr <- 'chr5'
+gen <- 'hg19'
+
+gtrack <- GenomeAxisTrack()
+itrack <- IdeogramTrack(genome = gen, chromosome = chr)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+txdb <- TxDb.Hsapiens.UCSC.hg19.knownGene
+
+gene <- GeneRegionTrack(TxDb.Hsapiens.UCSC.hg19.knownGene, chromosome = chr, geneSymbol = TRUE, start = 1, end = 1353848, transcriptAnnotation = "symbol", name = "Gene")
+z <- ranges(gene)
+z$symbol <- mapIds(Homo.sapiens, z$symbol, "SYMBOL", "TXNAME") 
+ranges(gene) <- z
+                    )
+
+alTrack <- AlignmentsTrack(range = "/Users/obriena2/Analysis/VNTR_ChIP_TEAD_Progenitor/TEAD1_PPG.output.sorted.bam",
+                           isPaired = TRUE,
+                          name = "TEAD1 ChIP Seq Progenitor")
+
+
+# Raw CRISPRi Scores for PANC1 and MP2 - will drop non-numeric column containing sgRNA sequences
+PANC1_raw <- DataTrack(range = "/Volumes/data/CRISPR_screening_v2/Feb23/PANC1/PANC1_virus_VS_T2_hg19/raw_scores.bedgraph", genome = gen, type = "p", chromosome = chr,  name = "PANC-1 CRISPRi", cex = 0.2)
+MP2_raw <- DataTrack(range = "/Volumes/data/CRISPR_screening_v2/Feb23/MP2/MP2_virus_VS_T2_hg19/raw_scores.bedgraph", genome = gen, type = "p", chromosome = chr,  name = "MIA PaCa-2 CRISPRi", cex = 0.2)
+
+# PANC1 Depleted Regions
+PANC1_Depleted <- AnnotationTrack(range =  "/Volumes/data/CRISPR_screening_v2/Feb23/PANC1/PANC1_virus_VS_T2_hg19/negative_significant_regions.bed", genome = gen, chromosome = chr)
+MP2_Depleted <- AnnotationTrack(range = "/Volumes/data/CRISPR_screening_v2/Feb23/MP2/MP2_virus_VS_T2_hg19/negative_significant_regions.bed", genome = gen, chromosome = chr,  name)
+
+# combined Depletion and P Value
+PANC1_comb <- OverlayTrack(list(PANC1_raw, PANC1_Depleted_test), name = "PANC-1 CRISPRi")
+MP2_comb <- OverlayTrack(list(MP2_raw, MP2_Depleted), name = "MIA PaCa-2 CRISPRi")
+
+# Add vertical indicators for VNTRs
+# Highlight Variant of interest
+
+ht <- HighlightTrack(trackList = list(itrack, gtrack, gene, PANC1_comb, MP2_comb, alTrack),
+           chromosome = chr, start = c(1326410, 1329137), width = 0,
+           fill = 1)
+
+pdf("/Users/obriena2/Documents/Thesis/Figures/GViz_TEAD1_progenitor.pdf", width = 10, height = 15)
+plotTracks(ht,
+           chromosome = chr, from =  1245849, to = 1353849)
+dev.off()
+
+```
+
