@@ -1,3 +1,4 @@
+# Script was a kind gift of Karen Funderburk
 #!/bin/sh
 
 #sbatch --cpus-per-task=6 --mem=75g --mail-type=END,FAIL --time=24:00:00 mRNA_TPM_QC.sh
