@@ -1,3 +1,5 @@
+# Script was a kind gift of Karen Funderburk
+
 #!/bin/sh 
 
 set -e 
